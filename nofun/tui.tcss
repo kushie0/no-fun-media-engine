@@ -1,0 +1,136 @@
+/* VenueDark palette */
+$bg:     #1a1a1a;
+$fg:     #dcdccc;
+$dim:    #666666;
+$red:    #cc6666;
+$green:  #b5bd68;
+$yellow: #f0c674;
+$cyan:   #8abeb7;
+
+Screen {
+    background: $bg;
+    color: $fg;
+    layers: base overlay;
+}
+
+#header {
+    height: 6;
+    dock: top;
+    background: $bg;
+}
+
+Banner {
+    width: auto;
+    height: 6;
+    color: $green;
+    background: $bg;
+}
+
+InventoryPanel {
+    height: 6;
+    color: $fg;
+    background: $bg;
+    padding: 0 2;
+}
+
+StatusBar {
+    height: 1;
+    background: $bg;
+    color: $cyan;
+    padding: 0 2;
+}
+
+RichLog {
+    background: $bg;
+    color: $fg;
+    border: none;
+    padding: 0 2;
+    scrollbar-background: $bg;
+    scrollbar-color: $dim;
+}
+
+ProgressRow {
+    height: 1;
+    background: $bg;
+    color: $cyan;
+    padding: 0 2;
+    display: none;
+}
+
+ProgressRow.active {
+    display: block;
+}
+
+Input {
+    height: 3;
+    background: $bg;
+    color: $fg;
+    border: tall $dim;
+    padding: 0 2;
+}
+
+Input:focus {
+    border: tall $yellow;
+}
+
+CommandBar {
+    height: 1;
+    background: $bg;
+    color: $fg;
+    padding: 0 2;
+}
+
+/* ── Menu mode: hide normal-mode widgets ─────────────────────── */
+#header.menu-active   { display: none; }
+RichLog.menu-active   { display: none; }
+
+/* ── MenuHeader ─────────────────────────────────────────────── */
+MenuHeader {
+    height: 4;
+    dock: top;
+    background: $bg;
+    color: $cyan;
+    display: none;
+}
+MenuHeader.active { display: block; }
+
+/* ── MenuBorderTop ───────────────────────────────────────────── */
+MenuBorderTop {
+    height: 1;
+    background: $bg;
+    color: $dim;
+    display: none;
+}
+MenuBorderTop.active { display: block; }
+
+/* ── MenuList ────────────────────────────────────────────────── */
+MenuList {
+    height: 1fr;
+    background: $bg;
+    color: $fg;
+    border: none;
+    padding: 0 0;
+    scrollbar-background: $bg;
+    scrollbar-color: $dim;
+    display: none;
+}
+MenuList.active { display: block; }
+
+MenuList > Static {
+    height: 1;
+    padding: 0 2;
+    background: $bg;
+    color: $fg;
+}
+MenuList > Static.menu-row-dim {
+    color: $dim;
+}
+
+/* ── MenuBorderBottom ────────────────────────────────────────── */
+MenuBorderBottom {
+    height: 1;
+    background: $bg;
+    color: $dim;
+    display: none;
+}
+MenuBorderBottom.active { display: block; }

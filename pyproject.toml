@@ -1,0 +1,24 @@
+[project]
+name = "process-videos"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "numpy>=1.26",
+    "pedalboard>=0.9",
+    "pyrubberband>=0.4.0",
+    "soundfile>=0.12",
+    "textual>=0.80",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "quality: encoding quality SSIM regression tests (run with --quality flag)",
+    "integration: integration tests that invoke real ffmpeg (run with --integration flag)",
+]

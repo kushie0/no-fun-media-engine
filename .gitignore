@@ -1,0 +1,34 @@
+# Python
+*.pyc
+**/__pycache__/
+.pytest_cache/
+.venv/
+
+# Media — test fixtures re-included below
+**/*.mp4
+**/*.mov
+**/*.wav
+**/*.zip
+!test_files/26-01-01_TestBand.mov
+!test_files/26-01-01_TestBand.wav
+
+# Runtime & machine-local state
+*.log
+file_summary.txt
+D:_logs_*.txt
+encoding_db.json
+encoding_db.tmp
+test_files/reference/
+
+# Pipeline output dirs
+audio/
+audio_archive/
+clips/
+video_archive/
+videos/
+trial_runs/
+
+# Local-only
+docs/active/
+docs/guides/ssh-workflow.md
+bin/
