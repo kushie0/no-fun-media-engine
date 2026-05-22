@@ -831,10 +831,26 @@ class CleanupMixin:
             except OSError as e:
                 dest = archive_dir / date_dir.name
                 if dest.exists():
-                    try:
-                        date_dir.rmdir()
-                    except OSError:
-                        pass
+                    # Stale copy already in archived/ (e.g. manually placed before this
+                    # feature existed). Evict it — but only if it holds no real media —
+                    # then retry the rename so the top-level item's SharePoint ID moves
+                    # intact (shared links given to bands survive).
+                    old_media = [
+                        f for f in dest.iterdir()
+                        if f.is_file() and f.name not in _SP_SYSTEM_FILES
+                    ]
+                    if not old_media:
+                        try:
+                            for f in list(dest.iterdir()):
+                                f.unlink(missing_ok=True)
+                            dest.rmdir()
+                            date_dir.rename(archive_dir / date_dir.name)
+                            self.logger.info(
+                                f"CLOUDCLEAN: moved {date_dir.name}/ → archived/"
+                                f" (replaced stale copy)"
+                            )
+                        except OSError:
+                            pass
                 else:
                     self.logger.warning(f"CLOUDCLEAN: could not archive {date_dir.name}/: {e}")
 

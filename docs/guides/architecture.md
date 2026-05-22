@@ -72,6 +72,46 @@ MediaEngineApp.run()              Pipeline.run_with_queue(cmd_queue, app)
 `run_ffmpeg` accepts `progress_cb` and `proc_cb` callbacks so the worker thread can
 push frame progress to the TUI and store the `Popen` handle for mid-encode kill.
 
+## SharePoint / OneDrive lifecycle
+
+Files are shared with bands via a OneDrive folder (`OneDrive - No Fun Troy LLC/Multitracks/`).
+Each performance gets a date subfolder (`YY-MM-DD_BAND1_BAND2/`) containing quad MP4s, the
+audio ZIP, and a `_nofun_info.txt` manifest listing files and expiry date.
+
+```
+Multitracks/
+  26-05-20_DEARMARYANNE_ETLY/   ← active: media present, within 28-day window
+  26-03-15_PV/                  ← active: media present, expires ~Jun 6
+  archived/
+    26-04-30_GRATITUDE/         ← expired stub: only _nofun_info.txt remains
+    26-04-29_NODIVISION/        ← expired stub
+    …
+  _sharepoint_permissions_YYYY-MM-DD.csv   ← access report (not for bands)
+```
+
+**Lifecycle stages:**
+
+1. **SYNC** (`_sync_eligible_performances`, every 15 min) — copies quad MP4s and audio ZIP
+   into the date folder; writes `_nofun_info.txt` with file list and 28-day expiry.
+2. **EXPIRE** (`_auto_expire_cloud_shares`, hourly) — deletes media files once past expiry;
+   updates `_nofun_info.txt` with a "files removed" note so bands who navigate there see an
+   explanation rather than an empty folder.
+3. **ARCHIVE** (`_archive_empty_cloud_folders`, called at the end of each expire run) — moves
+   the now-stub folder into `archived/`. The move is a filesystem `rename()`, which OneDrive
+   treats as a MOVE (item ID preserved), so any shared link given to bands still resolves to
+   the folder even in its new location.
+4. **RE-UPLOAD** (`_reupload_performance`, INVENTORY → REUPLOAD command) — if a band needs
+   files after expiry, moves the folder back from `archived/` to the top level and re-syncs,
+   resetting the 28-day clock.
+
+**Key invariants:**
+- The engine never deletes or recreates date folders — only `rename()` moves and file-level
+  `unlink()` deletes. SharePoint item IDs (and therefore shared links) are always preserved.
+- `archived/` is skipped by inventory scans and expiry checks — files there are considered
+  permanently expired and will not be re-deleted or re-synced automatically.
+- The `_nofun_info.txt` system file is never deleted, only rewritten. It is excluded from
+  "has media" checks so a folder containing only an info stub is treated as empty.
+
 ## Delete queue
 
 `DeleteQueue` accumulates files with `.add(path, reason)`. `execute()` is called
