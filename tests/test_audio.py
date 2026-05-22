@@ -461,39 +461,40 @@ class TestZipWavGroup:
         assert (fa.audio_archive / f.name).exists()
         fa.delete_queue.add.assert_not_called()
 
-    def test_updates_status_bar(self, tmp_path):
-        """_zip_wav_group should set the 'audio' op slot (not update_status directly)."""
+    def test_updates_audio_progress_row(self, tmp_path):
+        """_zip_wav_group should call update_audio_progress + clear_row on the app."""
         fa = _FakeAudio(tmp_path)
-        ops_set: list[tuple[str, str]] = []
-        fa._set_op = lambda k, v: ops_set.append((k, v))  # type: ignore[method-assign]
-        f = self._wav(tmp_path, '26-01-01_Band_ch01.wav')
+        fa._app = MagicMock()
+        files = [self._wav(tmp_path, f'26-01-01_Band_ch{n:02d}.wav') for n in range(1, 4)]
         fa._zip_wav_group(
-            '26-01-01_Band', [f],
+            '26-01-01_Band', files,
             zip_dest=fa.audio_dest,
             trim_dir=tmp_path,
             on_success_real_drive='delete',
         )
-        assert any(k == 'audio' for k, _ in ops_set), "Expected 'audio' op slot to be set"
+        # Progress callback fires per file when total > 1
+        assert fa._app.update_audio_progress.called, \
+            "Expected update_audio_progress to be called"
+        # Always cleared on the way out
+        fa._app.clear_row.assert_called_with('audio_progress')
 
-    def test_export_audio_zips_updates_status(self, tmp_path):
+    def test_export_audio_zips_drives_audio_row(self, tmp_path):
         fa = _FakeAudio(tmp_path)
-        ops_set: list[tuple[str, str]] = []
-        fa._set_op = lambda k, v: ops_set.append((k, v))  # type: ignore[method-assign]
-        (tmp_path / '26-01-01_Band_ch01.wav').write_bytes(b'\x00' * 256)
+        fa._app = MagicMock()
+        # Two channel files for one perf → total > 1 → progress fires
+        for n in (1, 2):
+            (tmp_path / f'26-01-01_Band_ch{n:02d}.wav').write_bytes(b'\x00' * 256)
         fa._export_audio_zips()
-        assert any(k == 'audio' for k, _ in ops_set), "Expected 'audio' op slot to be set"
+        assert fa._app.update_audio_progress.called
 
     def test_progress_includes_eta_for_multi_file_zip(self, tmp_path):
-        """_zip_wav_group appends ETA to the audio op slot once ≥ 2 files are done.
+        """update_audio_progress receives a non-empty eta string once ≥ 2 files are done.
 
         Real test ZIPs complete in microseconds, so we fake time.monotonic to
         return monotonically increasing values that simulate ~1.5 s per file.
         """
-        from unittest.mock import patch
-
         fa = _FakeAudio(tmp_path)
-        ops_set: list[tuple[str, str]] = []
-        fa._set_op = lambda k, v: ops_set.append((k, v))  # type: ignore[method-assign]
+        fa._app = MagicMock()
         files = [
             self._wav(tmp_path, f'26-01-01_Band_ch{n:02d}.wav')
             for n in range(1, 5)
@@ -511,9 +512,13 @@ class TestZipWavGroup:
                 trim_dir=tmp_path,
                 on_success_real_drive='delete',
             )
-        progress_lines = [text for k, text in ops_set if k == 'audio' and 'zipping' in text]
-        assert any('eta ' in line for line in progress_lines), \
-            f"Expected an 'eta ' in zip progress updates; got: {progress_lines}"
+        # The 6th positional arg of update_audio_progress is eta_str
+        eta_strings = [
+            call.args[5] if len(call.args) > 5 else call.kwargs.get('eta_str', '')
+            for call in fa._app.update_audio_progress.call_args_list
+        ]
+        assert any(s and 'eta ' in s for s in eta_strings), \
+            f"Expected an 'eta ' in progress calls; got eta args: {eta_strings}"
 
 
 # ---------------------------------------------------------------------------

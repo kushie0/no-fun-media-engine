@@ -61,6 +61,18 @@ ProgressRow.active {
     display: block;
 }
 
+AudioRow {
+    height: 1;
+    background: $bg;
+    color: $cyan;
+    padding: 0 2;
+    display: none;
+}
+
+AudioRow.active {
+    display: block;
+}
+
 Input {
     height: 3;
     background: $bg;

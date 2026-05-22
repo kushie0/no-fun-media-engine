@@ -18,9 +18,10 @@ import pathlib
 import re
 import shutil
 import subprocess
+import time
 from typing import TYPE_CHECKING
 
-from nofun.media_io import DeleteQueue, _DIM, _CYAN, _YELLOW, _R, fmt_size, probe_format, probe_stream
+from nofun.media_io import DeleteQueue, _DIM, _CYAN, _YELLOW, _R, fmt_size, probe_format, probe_stream, probe_total_frames
 from nofun.paths import detect_platform
 from nofun.script_runner import ScriptRunner, ScriptJob
 from nofun.state import PauseState
@@ -165,6 +166,13 @@ class VideoMixin:
         except Exception:
             pass
 
+        # Bump the banner perf counter the first time this perf encodes.
+        bumped: set = getattr(self, '_banner_bumped_perfs', set())
+        key = (date_str, band)
+        if key not in bumped and rs > 0 and self._app:
+            bumped.add(key)
+            self._app.bump_perf_count()
+
     # -----------------------------------------------------------------------
     # Quadrant encoding
     # -----------------------------------------------------------------------
@@ -207,6 +215,9 @@ class VideoMixin:
             src_dur = float(probe_format(source, 'duration') or 0.0)
         except (ValueError, TypeError):
             src_dur = 0.0
+        total_frames = probe_total_frames(source, src_dur)
+        from nofun.inventory import extract_date_band
+        _, band = extract_date_band(base)
         self.logger.info(
             f"ENCODING  {base} → quadrants  ({self.enc['enc_quad'][1]})",
             extra={
@@ -219,7 +230,11 @@ class VideoMixin:
 
         def _cb(frame: str, fps: str, tc: str, speed: str) -> None:
             if self._app:
-                self._app.update_progress(frame, fps, tc, speed, duration=src_dur)
+                self._app.update_progress(
+                    frame, fps, tc, speed,
+                    duration=src_dur, job_label='quadrants',
+                    band=band, total_frames=total_frames,
+                )
 
         runner = self._script_runner
         job = ScriptJob(
@@ -244,7 +259,7 @@ class VideoMixin:
 
         self._set_ffmpeg_proc('encode', None)
         if self._app:
-            self._app.clear_progress()
+            self._app.clear_row('progress')
         if rc == 0:
             for q in quads:
                 temps[q].rename(dests[q])
@@ -294,6 +309,9 @@ class VideoMixin:
             src_dur = float(probe_format(source, 'duration') or 0.0)
         except (ValueError, TypeError):
             src_dur = 0.0
+        total_frames = probe_total_frames(source, src_dur)
+        from nofun.inventory import extract_date_band
+        _, band = extract_date_band(base)
         self.logger.info(
             f"ENCODING  {base} → single  ({self.enc['enc_quad'][1]})",
             extra={
@@ -305,7 +323,11 @@ class VideoMixin:
 
         def _cb(frame: str, fps: str, tc: str, speed: str) -> None:
             if self._app:
-                self._app.update_progress(frame, fps, tc, speed, duration=src_dur)
+                self._app.update_progress(
+                    frame, fps, tc, speed,
+                    duration=src_dur, job_label='transcode',
+                    band=band, total_frames=total_frames,
+                )
 
         job = ScriptJob(
             script='transcode_single',
@@ -327,7 +349,7 @@ class VideoMixin:
         )
         self._set_ffmpeg_proc('encode', None)
         if self._app:
-            self._app.clear_progress()
+            self._app.clear_row('progress')
 
         if result.exit_code == 0:
             temp.rename(dest)
@@ -393,6 +415,9 @@ class VideoMixin:
             src_dur = float(probe_format(any_quad, 'duration') or 0.0) if any_quad else 0.0
         except (ValueError, TypeError):
             src_dur = 0.0
+        total_frames = probe_total_frames(any_quad, src_dur) if any_quad else None
+        from nofun.inventory import extract_date_band
+        _, band = extract_date_band(base)
 
         runner = self._script_runner
         job = ScriptJob(
@@ -412,11 +437,20 @@ class VideoMixin:
 
         def _cb(frame: str, fps: str, tc: str, speed: str) -> None:
             if self._app:
-                self._app.update_progress(frame, fps, tc, speed, duration=src_dur)
+                self._app.update_progress(
+                    frame, fps, tc, speed,
+                    duration=src_dur, job_label='clips',
+                    band=band, total_frames=total_frames,
+                )
+
+        _clip_t0: list[float] = []
 
         def _clip_cb(n: int, total: int) -> None:
+            if not _clip_t0:
+                _clip_t0.append(time.monotonic())
+            elapsed = time.monotonic() - _clip_t0[0] if _clip_t0 else 0.0
             if self._app:
-                self._app.update_clip_progress(n, total)
+                self._app.update_clip_progress(n, total, band=band, elapsed_s=elapsed)
 
         result = runner.run(
             job,
@@ -426,7 +460,7 @@ class VideoMixin:
         )
         self._set_ffmpeg_proc('encode', None)
         if self._app:
-            self._app.clear_progress()
+            self._app.clear_row('progress')
 
         quads_data = result.stdout_json.get('quads') if not result.killed else None
         if quads_data:

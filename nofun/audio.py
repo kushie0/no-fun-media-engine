@@ -265,7 +265,6 @@ class AudioMixin:
                 },
                 label=f'{base} → channels',
             )
-            self._set_op('audio', f'splitting {base}')
             result = runner.run(
                 job,
                 proc_cb=lambda p: self._set_ffmpeg_proc('audio', p),
@@ -273,7 +272,6 @@ class AudioMixin:
             rc = result.exit_code
 
             self._set_ffmpeg_proc('audio', None)
-            self._clear_op('audio')
             if rc == 0:
                 if not self.trial_run and self.mount_d != pathlib.Path('.'):
                     self._archive_or_dedup(f, self.audio_archive)
@@ -514,8 +512,6 @@ class AudioMixin:
                 self.delete_queue.add(f, "channel WAV already zipped", self.logger, tui=False)
             return
 
-        self._set_op('audio', f'zipping {group_key}')
-
         if self.trial_run:
             source_files: list[pathlib.Path] = []
             for f in files:
@@ -538,24 +534,17 @@ class AudioMixin:
         total_files = len(source_files)
 
         def _progress(done: int, total: int) -> None:
-            pct        = done * 100 // total
-            elapsed    = time.monotonic() - zip_start
-            mins, secs = divmod(int(elapsed), 60)
-            t = f"{mins}:{secs:02d}" if mins else f"{int(elapsed)}s"
+            elapsed = time.monotonic() - zip_start
             # ETA needs ≥ 2 datapoints — first per-file callback is too early
             # to extrapolate; with 4 parallel workers the second arrives
             # within ~1 s of the first under normal load.
+            eta = ''
             if done >= 2 and elapsed > 0:
-                per_file  = elapsed / done
-                remaining = per_file * (total - done)
-                eta       = format_eta(remaining)
-            else:
-                eta = ''
-            extras = f' · {eta}' if eta else ''
-            self._set_op(
-                'audio',
-                f'zipping {group_key}  [{done}/{total} · {pct}% · {t}{extras}]',
-            )
+                eta = format_eta((elapsed / done) * (total - done))
+            if self._app:
+                self._app.update_audio_progress(
+                    'multitrack', group_key, done, total, elapsed, eta,
+                )
 
         success, dropped = self._create_and_verify_zip(
             zip_path, source_files,
@@ -564,7 +553,8 @@ class AudioMixin:
 
         if not success:
             self.logger.error(f"Zip verification failed for {zip_path.name}")
-            self._clear_op('audio')
+            if self._app:
+                self._app.clear_row('audio_progress')
             return
 
         try:
@@ -590,7 +580,8 @@ class AudioMixin:
                 if f not in dropped_set:
                     self.delete_queue.add(f, "source WAV zipped", self.logger, tui=False)
 
-        self._clear_op('audio')
+        if self._app:
+            self._app.clear_row('audio_progress')
 
     def _collect_chan_candidates(
         self, scan_dir: pathlib.Path, *, exclude_split: bool = False

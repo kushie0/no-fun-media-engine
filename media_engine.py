@@ -50,6 +50,7 @@ from nofun.media_io import (
     is_cloud_only,
     is_file_locked,
     probe_format,
+    probe_total_frames,
     setup_logging,
 )
 from nofun.cleanup import (
@@ -211,6 +212,14 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # File-event tracking (populated each loop iteration)
         self._known_files:    dict[str, tuple[int, float]] = {}
         self._pipeline_moved: queue.Queue[str]             = queue.Queue()
+
+        # Tracks (date, band) pairs that have been bumped on the banner this
+        # session, so encode retries don't double-increment the perf count.
+        self._banner_bumped_perfs: set[tuple[str, str]] = set()
+
+        # Cached total-ETA seconds, refreshed by the watchdog and read by
+        # _format_status() for the "~N min remaining" status-line segment.
+        self._cached_total_eta: float | None = None
 
         # Size-stability tracking: {path_str: (size, first_seen_at_that_size)}
         # A file must keep the same size for _STABLE_SECS before processing.
@@ -1613,6 +1622,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             'CANCEL stops the selected job (pending → removed; running → killed).',
             'History is read from the last two log files.',
         ]),
+        ('STREAMS',   'Open the live-streams menu (start/stop per-quad VLC streams)', [
+            'Opens the STREAMS menu. Lists each quadrant stream slot and its',
+            'current state. Used to preview live or recently encoded performances',
+            'without leaving the engine.',
+        ]),
         ('PAUSE',     'Pause before the next encode job starts', [
             'Sets _pause_state → SOFT_PENDING. Pipeline finishes the current job',
             'then stops. To stop the running job immediately, open JOBS and type',
@@ -2055,14 +2069,25 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         except queue.Empty:
             pass
 
-        # Files that vanished without our pipeline moving them
+        # Files that vanished without our pipeline moving them.
+        # MOV disappearances are unexpected — log individually.
+        # WAV disappearances are routine (recording software managing its own
+        # files during active recording) — batch into a single count.
+        removed_wavs: list[str] = []
         for path_str in self._known_files:
             if path_str not in current and path_str not in suppressed:
                 p = pathlib.Path(path_str)
-                self.logger.info(
-                    f"REMOVED   {p.name}  (disappeared externally)",
-                    extra={'path': path_str},
-                )
+                if p.suffix.lower() == '.wav':
+                    removed_wavs.append(p.name)
+                else:
+                    self.logger.info(
+                        f"REMOVED   {p.name}  (disappeared externally)",
+                        extra={'path': path_str},
+                    )
+        if removed_wavs:
+            self.logger.info(
+                f"REMOVED   {len(removed_wavs)} .wav file(s) disappeared externally",
+            )
 
         self._known_files = current
 
@@ -2179,22 +2204,36 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self.force              = False
 
     def _format_status(self, mov_files: list, wav_files: list, can_process: bool) -> str:
-        """Return a Rich markup string for the idle portion of the StatusBar."""
+        """Return a Rich markup string for the idle portion of the StatusBar.
+
+        Layout: ``[time]  N× .mov  ·  N× .wav  ·  J jobs  ·  ~M min remaining``
+        plus pause-state / scheduling prefixes when active. Recording stems and
+        per-op names now live in the progress rows above the bar.
+        """
         ts    = datetime.datetime.now().strftime('%H:%M:%S')
         parts: list[str] = []
 
-        if mov_files or wav_files:
-            parts.append(
-                f"[cyan]{len(mov_files)}[/cyan] .mov  "
-                f"[cyan]{len(wav_files)}[/cyan] .wav pending"
-            )
-        else:
+        if mov_files:
+            parts.append(f"[cyan]{len(mov_files)}×[/cyan] .mov")
+        if wav_files:
+            parts.append(f"[cyan]{len(wav_files)}×[/cyan] .wav")
+        if not mov_files and not wav_files:
             parts.append("[dim]no files pending[/dim]")
 
         recording = self._get_recording_files()
         if recording:
             stems = list(dict.fromkeys(f.stem for f in recording))
             parts.append(f"[yellow]recording  {'  '.join(stems)}[/yellow]")
+
+        summary = self._job_queue.summary()
+        n_jobs  = summary.get('running', 0) + summary.get('pending', 0)
+        if n_jobs:
+            parts.append(f"[dim]{n_jobs} jobs[/dim]")
+
+        eta_s = self._cached_total_eta
+        if eta_s and eta_s > 60:
+            parts.append(f"[dim]~{int(eta_s // 60)} min remaining[/dim]")
+
         match self._pause_state:
             case PauseState.PAUSED:
                 parts.append("[bold red]PAUSED[/bold red]")
@@ -2209,6 +2248,42 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             parts.append("[green]streams live[/green]")
         sep = "  [dim]·[/dim]  "
         return f"[dim]\\[{ts}][/dim]  {sep.join(parts)}"
+
+    # Per-kind wall-time estimates (seconds), calibrated from 2026-05-22 show
+    _KIND_WALL_S: dict[str, float] = {
+        'encode_quads':     780,   # ~13 min for ~45-min source at 3.5x
+        'transcode_single': 780,
+        'generate_reel':    540,   # ~9 min for ~45-min source at 5.5x
+        'export_clips':      30,
+        'split_audio':       15,
+        '_archive_audio':   210,   # ~3.5 min per ZIP group
+        '_remaster':        120,
+        '_sync_quads':       90,
+        '_sync_audio':       60,
+        '_sync_reel':        30,
+        '_reupload':         60,
+        '_scan':             30,
+        '_cleanup_execute':  30,
+        '_rename':            5,
+    }
+    _UNKNOWN_KIND_WALL_S = 60.0   # fallback when a new job kind appears
+
+    def _estimate_total_eta(self) -> float | None:
+        """Rough wall-time remaining to drain the active job queue.
+
+        Sums per-job wall estimates grouped by JobCategory; returns the
+        max lane since GPU, CPU, and SCHEDULED jobs dispatch in parallel.
+        None when the queue is idle.
+        """
+        active = self._job_queue.all_active()
+        if not active:
+            return None
+        lanes: dict = {}
+        for qj in active:
+            cost = self._KIND_WALL_S.get(qj.job.kind, self._UNKNOWN_KIND_WALL_S)
+            lanes[qj.category] = lanes.get(qj.category, 0.0) + cost
+        total = max(lanes.values(), default=0.0)
+        return total if total > 0 else None
 
     # -----------------------------------------------------------------------
     # Per-band processing helpers (called concurrently from band loop)
@@ -2287,7 +2362,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
     ) -> None:
         """Run the full audio pipeline for one performance in a thread."""
         if ch_files:
-            self._set_op('audio', 'archiving to ZIP')
             for gk, gf in self._group_wav_files(ch_files).items():
                 if self._pause_state == PauseState.HARD_PENDING:
                     break
@@ -2295,7 +2369,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     gk, gf, zip_dest=self.audio_dest,
                     trim_dir=self.search_dir, on_success_real_drive='delete',
                 )
-            self._clear_op('audio')
 
         if sd_files and self._pause_state not in (PauseState.SOFT_PENDING, PauseState.HARD_PENDING):
             self._process_audio_group(perf, sd_files, self.search_dir)
@@ -2330,9 +2403,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
     ) -> None:
         """Run the full video pipeline for one performance in a thread."""
         for mov in mov_list:
-            self._set_op('encode', mov.stem)
             ok = self._process_mov(mov, skip_clips=skip_clips)
-            self._clear_op('encode')
             if not ok:
                 self.logger.warning(
                     f"ALERT   {mov.stem} — encode failed; job marked failed in queue"
@@ -2424,7 +2495,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             f for q in ('UL', 'UR', 'LL', 'LR')
             for f in sorted(self.vids_dest.glob(f'{prefix}*_{q}.mp4'))
         ]
+        if not quad_files:
+            return
+        self.logger.info(f"SYNC    {perf}  quads ({len(quad_files)} files) → OneDrive")
         self._sync_perf_files(perf, quad_files)
+        self.logger.info(f"SYNC    {perf}  quads done")
 
     def _sync_perf_audio(self, perf: str) -> None:
         """Copy the ZIP archive for perf to SharePoint."""
@@ -2436,7 +2511,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             zf for zf in self.audio_dest.glob('*.zip')
             if extract_date_band(zf.stem) == (date_str, band)
         ] if self.audio_dest.is_dir() else []
+        if not zip_files:
+            return
+        self.logger.info(f"SYNC    {perf}  audio ({len(zip_files)} files) → OneDrive")
         self._sync_perf_files(perf, zip_files)
+        self.logger.info(f"SYNC    {perf}  audio done")
 
     def _do_reel_for_perf(self, perf: str) -> None:
         """Render one reel per quad set for perf using the shared FULLSET MP3.
@@ -2496,11 +2575,18 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 reel_dur = float(probe_format(ul, 'duration') or 0.0)
             except (ValueError, TypeError):
                 reel_dur = 0.0
+            reel_frames = probe_total_frames(ul, reel_dur)
+            _, reel_band = extract_date_band(real_base)
 
             def _reel_progress(frame: str, fps: str, tc: str, speed: str,
-                               _out=out, _last=_last_hb, _dur=reel_dur) -> None:
+                               _out=out, _last=_last_hb, _dur=reel_dur,
+                               _tf=reel_frames, _band=reel_band) -> None:
                 if self._app:
-                    self._app.update_progress(frame, fps, tc, speed, duration=_dur)
+                    self._app.update_progress(
+                        frame, fps, tc, speed,
+                        duration=_dur, job_label='reel',
+                        band=_band, total_frames=_tf,
+                    )
                 now = time.monotonic()
                 if now - _last[0] >= _HB_INTERVAL:
                     self.logger.debug(
@@ -2518,7 +2604,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             self.logger.debug(f'REEL  generate_reel returned ok={ok}', extra={'tui': False})
             self._set_ffmpeg_proc('reel', None)
             if self._app:
-                self._app.clear_progress()
+                self._app.clear_row('progress')
             self._clear_op('remaster')
             if ok and out.exists():
                 self._sync_perf_files(perf, [out])
@@ -2917,15 +3003,14 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
             _in_menu = (self._active_menu != MenuMode.NONE)
             if app and not _in_menu:
+                self._cached_total_eta = self._estimate_total_eta()
                 app.update_status(self._format_status(mov_files, wav_files, can_process))
 
             if can_process:
                 if not self.skip_audio:
                     # Multi-ch raw WAVs: split upfront (produces _ch??.wav files)
                     if wav_files:
-                        self._set_op('audio', 'splitting channels')
                         self._split_multichannel_wavs(wav_files)
-                        self._clear_op('audio')
 
                 # Build per-performance maps (oldest-first processing order)
                 perf_ch: dict[str, list[pathlib.Path]] = defaultdict(list)

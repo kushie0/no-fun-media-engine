@@ -19,6 +19,16 @@ from nofun.media_io import fmt_size
 from nofun.state import MenuMode
 
 
+_SHORT_LABEL: dict[str, str] = {
+    'NEW':                      'NEW',
+    'INCOMPLETE VIDEO + AUDIO': 'V+A',
+    'INCOMPLETE VIDEO':         'V',
+    'INCOMPLETE AUDIO':         'A',
+    'UNSHARED':                 'OK',
+    'SHARED':                   '↑',
+}
+
+
 class InventoryMenuMixin:
 
     _INVENTORY_HELP: list[tuple[str, str, list[str]]] = [
@@ -77,39 +87,6 @@ class InventoryMenuMixin:
         """
         from nofun.tui import MenuRow
 
-        def _db_tag(path: pathlib.Path) -> str:
-            rec = self._encoding_db.lookup(path)
-            if rec is None:
-                return '[dim](not scanned)[/dim]'
-            if self._encoding_db.is_stale(rec, path):
-                return '[dim](stale)[/dim]'
-            if rec.get('problematic'):
-                return '[bold red]PROBLEMATIC[/bold red]'
-            parts = [rec.get('codec', '?')]
-            if rec.get('resolution'):
-                parts.append(rec['resolution'])
-            dur = rec.get('duration')
-            if dur:
-                mins, secs = divmod(int(dur), 60)
-                parts.append(f"{mins}:{secs:02d}")
-            br = rec.get('bitrate_kbps')
-            if br:
-                parts.append(f"{br}kbps")
-            return f"[dim]{' · '.join(parts)}[/dim]"
-
-        def _clips_summary(files: list[pathlib.Path], date: str, band: str) -> str:
-            cs = self._encoding_db.get_clips_summary(date, band)
-            if cs:
-                codec_hint = f"  [dim]{cs['codec']}[/dim]" if cs.get('codec') else ''
-                return f"[dim]{fmt_size(cs.get('total_size', 0))}  {cs.get('count', len(files))} clips[/dim]{codec_hint}"
-            total_size = sum(f.stat().st_size for f in files if f.exists())
-            return f"[dim]{fmt_size(total_size)}  {len(files)} clips[/dim]"
-
-        def _raw_audio_summary(files: list[pathlib.Path]) -> str:
-            total_size = sum(f.stat().st_size for f in files if f.exists())
-            n = len(files)
-            return f"[dim]{fmt_size(total_size)}  {n} wav{'s' if n != 1 else ''}[/dim]"
-
         def _worst_state(perf_list: list) -> tuple[str, str]:
             priority = [
                 'NEW', 'INCOMPLETE VIDEO + AUDIO', 'INCOMPLETE VIDEO',
@@ -142,7 +119,7 @@ class InventoryMenuMixin:
         # Column header
         rows.append(MenuRow(
             index=None,
-            text=f"{'Show':<40}  Status",
+            text=f"{'Show':<56}  St    Age",
             dim=True,
         ))
 
@@ -153,25 +130,26 @@ class InventoryMenuMixin:
             icon       = _STATUS_ICON.get(label, '?')
             age        = perf_list[0].age_days if perf_list else None
 
-            # Overdue badges — show first one on collapsed row
             all_overdue: list[str] = []
             for ps in perf_list:
                 all_overdue.extend(ps.lifecycle_overdue)
-            overdue_badge = f"  [dim]⏰ {all_overdue[0]}[/dim]" if all_overdue else ''
+            overdue_badge = '  [yellow]⏰[/yellow]' if all_overdue else ''
 
-            # Job queue badge — uses YY-MM-DD prefix (manifest keys are YY-MM-DD_Band)
             short_date = date[2:] if date.startswith('20') else date
             jstatus    = self._job_queue.manifest_status_by_date(short_date)
             job_badge  = f'  [cyan]⚙ {jstatus}[/cyan]' if jstatus else ''
 
-            sn = (show_name[:38] + '..') if len(show_name) > 40 else show_name
+            sn      = (show_name[:54] + '..') if len(show_name) > 56 else show_name
+            short   = _SHORT_LABEL.get(label, label[:4])
+            age_str = f"{age}d" if age is not None else '?d'
+
             if date == self._status_expanded_key:
                 scroll_to_row = len(rows)
             rows.append(MenuRow(
                 index=i,
                 text=(
-                    f"{sn:<40}  [{col}]{icon} {label}[/{col}]"
-                    f"  [dim]{age}d ago[/dim]{overdue_badge}{job_badge}"
+                    f"{sn:<56}  [{col}]{icon} {short}[/{col}]"
+                    f"  [dim]{age_str}[/dim]{overdue_badge}{job_badge}"
                 ),
             ))
 
@@ -181,87 +159,94 @@ class InventoryMenuMixin:
                 for ps in perf_list:
                     b_lbl, b_col = _status_label(ps)
                     b_icon = _STATUS_ICON.get(b_lbl, '?')
-                    b      = (ps.band[:22] + '..') if len(ps.band) > 24 else ps.band
+                    b = (ps.band[:38] + '..') if len(ps.band) > 40 else ps.band
 
-                    # Missing component badges — filter by lifecycle stage
                     ps_age = ps.age_days or 0
                     expected_missing = [
                         m for m in ps.missing_components
                         if not (m in ('cloud quadrants', 'cloud zip') and ps_age > EXPIRE_AGE)
                         and not (m in ('video raw', 'audio raw') and ps_age > RAW_EXPIRE_AGE)
                     ]
-                    miss_badge = (
+                    miss_text = (
                         f"  [dim]missing: {', '.join(expected_missing)}[/dim]"
                         if expected_missing else ''
                     )
+                    rows.append(MenuRow(index=None,
+                        text=f"    [{b_col}]{b_icon} {b}[/{b_col}]{miss_text}"))
 
-                    rows.append(MenuRow(
-                        index=None,
-                        text=f"    [{b_col}]{b_icon} {b}[/{b_col}]{miss_badge}",
-                    ))
-
-                    # Quadrant files — one row each with DB metadata
+                    # Quadrants — one summary line
                     if ps.quad_files:
-                        rows.append(MenuRow(index=None, text='        [bold]Quadrants[/bold]', dim=True))
-                        for f in sorted(ps.quad_files):
-                            size_str = fmt_size(f.stat().st_size) if f.exists() else '?'
-                            rows.append(MenuRow(
-                                index=None,
-                                text=f"          {f.name}  [dim]{size_str}[/dim]  {_db_tag(f)}",
-                            ))
-
-                    # Clips — collapsed summary
-                    if ps.clip_files:
-                        rows.append(MenuRow(index=None, text='        [bold]Clips[/bold]', dim=True))
-                        rows.append(MenuRow(
-                            index=None,
-                            text=f"          {_clips_summary(ps.clip_files, date, ps.band)}",
-                        ))
-
-                    # Audio zip
-                    if ps.zip_files:
-                        rows.append(MenuRow(index=None, text='        [bold]Audio zip[/bold]', dim=True))
-                        for f in sorted(ps.zip_files):
-                            size_str = fmt_size(f.stat().st_size) if f.exists() else '?'
+                        total_size = sum(f.stat().st_size for f in ps.quad_files if f.exists())
+                        prob_any = False
+                        for f in ps.quad_files:
                             rec = self._encoding_db.lookup(f)
-                            ch_hint = (
-                                f"  [dim]{rec['channel_count']} ch[/dim]"
-                                if rec and rec.get('channel_count') else ''
-                            )
-                            rows.append(MenuRow(
-                                index=None,
-                                text=f"          {f.name}  [dim]{size_str}[/dim]{ch_hint}",
-                            ))
+                            if rec and rec.get('problematic'):
+                                prob_any = True
+                                break
+                        if prob_any:
+                            qual = '  [bold red]PROBLEMATIC[/bold red]'
+                        else:
+                            first_rec = self._encoding_db.lookup(ps.quad_files[0])
+                            qual_parts: list[str] = []
+                            if first_rec and not self._encoding_db.is_stale(first_rec, ps.quad_files[0]):
+                                if first_rec.get('resolution'):
+                                    qual_parts.append(first_rec['resolution'])
+                                dur = first_rec.get('duration')
+                                if dur:
+                                    mins, secs = divmod(int(dur), 60)
+                                    qual_parts.append(f"{mins}:{secs:02d}")
+                            qual = f"  [dim]{' · '.join(qual_parts)}[/dim]" if qual_parts else ''
+                        rows.append(MenuRow(index=None,
+                            text=f"      [dim]Quads  [/dim] {len(ps.quad_files)}× .mp4  {fmt_size(total_size)}{qual}"))
 
-                    # Audio raw — collapsed summary
+                    # Clips — one summary line
+                    if ps.clip_files:
+                        cs = self._encoding_db.get_clips_summary(date, ps.band)
+                        if cs:
+                            count = cs.get('count', len(ps.clip_files))
+                            size  = fmt_size(cs.get('total_size', 0))
+                            codec_hint = f"  [dim]{cs['codec']}[/dim]" if cs.get('codec') else ''
+                            rows.append(MenuRow(index=None,
+                                text=f"      [dim]Clips  [/dim] {count} clips  {size}{codec_hint}"))
+                        else:
+                            total_size = sum(f.stat().st_size for f in ps.clip_files if f.exists())
+                            rows.append(MenuRow(index=None,
+                                text=f"      [dim]Clips  [/dim] {len(ps.clip_files)} clips  {fmt_size(total_size)}"))
+
+                    # Audio zip — one summary line
+                    if ps.zip_files:
+                        total_size = sum(f.stat().st_size for f in ps.zip_files if f.exists())
+                        first_rec  = self._encoding_db.lookup(ps.zip_files[0])
+                        ch_hint    = (
+                            f"  [dim]{first_rec['channel_count']} ch[/dim]"
+                            if first_rec and first_rec.get('channel_count') else ''
+                        )
+                        n_z = len(ps.zip_files)
+                        zip_label = f"{n_z}× .zip" if n_z > 1 else ps.zip_files[0].name[:40]
+                        rows.append(MenuRow(index=None,
+                            text=f"      [dim]Audio  [/dim] {zip_label}  {fmt_size(total_size)}{ch_hint}"))
+
+                    # Raw WAV — one summary line
                     raw_audio = ps.raw_wavs + ps.wav_files
                     if raw_audio:
-                        rows.append(MenuRow(index=None, text='        [bold]Audio raw[/bold]', dim=True))
-                        rows.append(MenuRow(
-                            index=None,
-                            text=f"          {_raw_audio_summary(raw_audio)}",
-                        ))
+                        total_size = sum(f.stat().st_size for f in raw_audio if f.exists())
+                        n = len(raw_audio)
+                        rows.append(MenuRow(index=None,
+                            text=f"      [dim]Raw WAV[/dim] {n} wav{'s' if n != 1 else ''}  {fmt_size(total_size)}"))
 
-                    # Raw source video
+                    # Raw .mov — one summary line
                     raw_video = ps.raw_movs + ps.mov_files
                     if raw_video:
-                        rows.append(MenuRow(index=None, text='        [bold]Raw source[/bold]', dim=True))
-                        for f in sorted(raw_video):
-                            size_str = fmt_size(f.stat().st_size) if f.exists() else '?'
-                            rows.append(MenuRow(
-                                index=None,
-                                text=f"          {f.name}  [dim]{size_str}[/dim]",
-                            ))
+                        total_size = sum(f.stat().st_size for f in raw_video if f.exists())
+                        n = len(raw_video)
+                        rows.append(MenuRow(index=None,
+                            text=f"      [dim]Raw .mov[/dim]{n}× .mov  {fmt_size(total_size)}"))
 
-                    # Cloud
+                    # Cloud — one summary line
                     if ps.cloud_files:
-                        rows.append(MenuRow(index=None, text='        [bold]Cloud[/bold]', dim=True))
-                        for f in sorted(ps.cloud_files):
-                            size_str = fmt_size(f.stat().st_size) if f.exists() else '?'
-                            rows.append(MenuRow(
-                                index=None,
-                                text=f"          {f.name}  [dim]{size_str}[/dim]",
-                            ))
+                        cloud_size = sum(f.stat().st_size for f in ps.cloud_files if f.exists())
+                        rows.append(MenuRow(index=None,
+                            text=f"      [dim]Cloud  [/dim] {len(ps.cloud_files)} files  {fmt_size(cloud_size)}"))
 
                     rows.append(MenuRow(index=None, text='', dim=True))
 

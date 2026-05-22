@@ -390,6 +390,22 @@ def probe_format(filepath: pathlib.Path, entry: str) -> str:
     return result.stdout.strip()
 
 
+def probe_total_frames(filepath: pathlib.Path, duration_s: float) -> int | None:
+    """Estimate total frames as duration × source fps. Returns None when fps
+    can't be probed or duration is zero. One ffprobe call."""
+    if not duration_s or duration_s <= 0:
+        return None
+    fps_str = probe_stream(filepath, 'r_frame_rate')
+    if not fps_str:
+        return None
+    try:
+        num, den = fps_str.split('/') if '/' in fps_str else (fps_str, '1')
+        src_fps = float(num) / float(den) if float(den) else 0.0
+    except (ValueError, ZeroDivisionError):
+        return None
+    return int(duration_s * src_fps) if src_fps > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Size formatter
 # ---------------------------------------------------------------------------

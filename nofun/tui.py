@@ -156,7 +156,12 @@ class StatusBar(Static):
 
 
 class ProgressRow(Static):
-    """Single-line ffmpeg progress — shown only while a job is running."""
+    """Single-line GPU job progress (encode, reel, clips) — shown only while running."""
+    pass
+
+
+class AudioRow(Static):
+    """Single-line CPU job progress (multitrack ZIP, mastering) — shown only while running."""
     pass
 
 
@@ -277,6 +282,30 @@ class MenuList(ScrollableContainer):
 # Logging handler
 # ---------------------------------------------------------------------------
 
+class _WavRemovedRateLimit(logging.Filter):
+    """Rate-limit 'disappeared externally' lines to 1 per 60 s in the TUI.
+
+    File handlers do not get this filter — full detail stays in the log.
+    Catches the visibility hole that opened during audio-archive cleanup:
+    dozens of REMOVED events scroll real activity off-screen in seconds.
+    """
+
+    _WINDOW_S = 60.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last: float = 0.0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if 'disappeared externally' not in record.getMessage():
+            return True
+        now = time.monotonic()
+        if now - self._last < self._WINDOW_S:
+            return False
+        self._last = now
+        return True
+
+
 class TextualLogHandler(logging.Handler):
     """Logging handler that writes records to a RichLog widget.
 
@@ -372,6 +401,7 @@ class MediaEngineApp(App):
         # Always visible
         yield RichLog(id='log', highlight=True, markup=True, wrap=True)
         yield ProgressRow(id='progress')
+        yield AudioRow(id='audio_progress')
         yield Input(placeholder='type a command…', id='cmd_input')
         yield CommandBar(id='cmd_bar')
         yield StatusBar(id='status')
@@ -393,6 +423,7 @@ class MediaEngineApp(App):
                 logger.removeHandler(h)
         handler = TextualLogHandler(self, log_widget)
         handler.setLevel(logging.INFO)
+        handler.addFilter(_WavRemovedRateLimit())
         logger.addHandler(handler)
         self._tui_log_handler = handler
 
@@ -634,32 +665,77 @@ class MediaEngineApp(App):
 
     def update_progress(
         self,
-        frame:    str,
-        fps:      str,
-        tc:       str,
-        speed:    str,
-        duration: float | None = None,
+        frame:        str,
+        fps:          str,
+        tc:           str,
+        speed:        str,
+        duration:     float | None = None,
+        job_label:    str          = 'encode',
+        band:         str          = '',
+        total_frames: int | None   = None,
     ) -> None:
-        """Show ffmpeg progress. Safe to call from the pipeline worker thread.
+        """Show GPU job progress. Safe to call from the pipeline worker thread.
 
-        duration: source seconds \u2014 when supplied, an 'eta Xm Ys' segment is
-        appended. Pass None (default) when the source duration is unknown.
+        Renders ``\u25ce  {job_label} {band}  [frame N \u00b7 pct \u00b7 eta]  GPU N%``.
+        Each bracket segment is added only when its source data is available;
+        the GPU segment is omitted when SysMon can't read the counter.
         """
         from nofun.media_io import compute_ffmpeg_eta
-        eta_str = compute_ffmpeg_eta(tc, speed, duration)
-        row     = self.query_one('#progress', ProgressRow)
-        text    = (
-            f"  \u25ce  frame [cyan]{frame:>6}[/cyan]"
-            f"  fps {fps:>5}  {tc}  [yellow]{speed}[/yellow]"
-        )
+        from nofun.sysmon   import SysMon
+        eta_str  = compute_ffmpeg_eta(tc, speed, duration)
+        _, gpu_pct = SysMon.get()
+
+        try:
+            frame_int = int(frame)
+        except (ValueError, TypeError):
+            frame_int = 0
+        bracket = f'frame [cyan]{frame_int}[/cyan]'
+        if total_frames and frame_int > 0:
+            pct = min(frame_int * 100 // total_frames, 99)
+            bracket += f'/~{total_frames} \u00b7 {pct}%'
         if eta_str:
-            text += f"  [dim]{eta_str}[/dim]"
+            bracket += f' \u00b7 {eta_str}'
+
+        label = f'{job_label} [yellow]{band}[/yellow]' if band else job_label
+        # \[ escapes the literal opening bracket so Textual's markup parser
+        # doesn't try to parse `[frame [cyan]N[/cyan]\u2026]` as a malformed tag.
+        text  = f'  \u25ce  {label}  \\[{bracket}]'
+        if gpu_pct is not None:
+            text += f'  [dim]GPU {gpu_pct:.0f}%[/dim]'
+        row = self.query_one('#progress', ProgressRow)
         self.call_from_thread(row.update, text)
         self.call_from_thread(row.add_class, 'active')
 
-    def clear_progress(self) -> None:
-        """Hide the progress row when ffmpeg finishes."""
-        row = self.query_one('#progress', ProgressRow)
+    def update_audio_progress(
+        self,
+        job_label: str,
+        band:      str,
+        done:      int,
+        total:     int,
+        elapsed_s: float,
+        eta_str:   str = '',
+    ) -> None:
+        """Show CPU job progress (multitrack ZIP). Safe to call from any thread.
+
+        Renders ``\u229e  {job_label} {band}  [done/total \u00b7 pct \u00b7 elapsed \u00b7 eta]  CPU N%``.
+        """
+        from nofun.sysmon import SysMon
+        cpu_pct, _ = SysMon.get()
+        pct = done * 100 // total if total else 0
+        mins, secs = divmod(int(elapsed_s), 60)
+        t = f'{mins}:{secs:02d}' if mins else f'{int(elapsed_s)}s'
+        bracket = f'{done}/{total} \u00b7 {pct}% \u00b7 {t}'
+        if eta_str:
+            bracket += f' \u00b7 {eta_str}'
+        label = f'{job_label} [yellow]{band}[/yellow]' if band else job_label
+        text  = f'  \u229e  {label}  \\[{bracket}]  [dim]CPU {cpu_pct:.0f}%[/dim]'
+        row = self.query_one('#audio_progress', AudioRow)
+        self.call_from_thread(row.update, text)
+        self.call_from_thread(row.add_class, 'active')
+
+    def clear_row(self, row_id: str) -> None:
+        """Hide a progress row by id ('progress' or 'audio_progress'). Thread-safe."""
+        row = self.query_one(f'#{row_id}', Static)
         self.call_from_thread(row.remove_class, 'active')
 
     def update_command_bar(self, text: str) -> None:
@@ -679,10 +755,16 @@ class MediaEngineApp(App):
             self.query_one('#inv_panel', InventoryPanel).queue_health = text
         self._dispatch(_do)
 
-    def update_clip_progress(self, n: int, total: int) -> None:
+    def update_clip_progress(self, n: int, total: int, band: str = '', elapsed_s: float = 0.0) -> None:
         """Show clip export progress X/T in the progress row. Thread-safe."""
-        row  = self.query_one('#progress', ProgressRow)
-        text = f"  \u25ce  clips [cyan]{n}/{total}[/cyan]"
+        label   = f'clips [yellow]{band}[/yellow]' if band else 'clips'
+        row     = self.query_one('#progress', ProgressRow)
+        pct_str = f'  {int(n * 100 / total)}%' if total else ''
+        eta_str = ''
+        if elapsed_s > 0 and 0 < n < total:
+            secs = int((total - n) * elapsed_s / n)
+            eta_str = f'  eta {secs // 60}m {secs % 60}s' if secs >= 60 else f'  eta {secs}s'
+        text = f"  \u25ce  {label}  \\[{n}/{total}{pct_str}{eta_str}]"
         self.call_from_thread(row.update, text)
         self.call_from_thread(row.add_class, 'active')
 
@@ -707,6 +789,13 @@ class MediaEngineApp(App):
             if total_runtime_seconds >= 0:
                 panel.total_runtime_seconds = total_runtime_seconds
         self.call_from_thread(_do_update)
+
+    def bump_perf_count(self) -> None:
+        """Increment the banner perf counter by 1. Thread-safe."""
+        def _do() -> None:
+            panel = self.query_one('#inv_panel', InventoryPanel)
+            panel.perf_count += 1
+        self.call_from_thread(_do)
 
     def update_streams_text(self, text: str) -> None:
         """Update the live-streams line on the inventory panel. Thread-safe."""

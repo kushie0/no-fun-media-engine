@@ -150,23 +150,17 @@ class JobsMenuMixin:
                     text=f"  {sel_marker}{icon} {label:<38}{lane_tag}  {st}{elapsed_str}",
                 ))
 
-                if qj.status == 'running':
-                    runner = None
-                    if qj.category == JobCategory.GPU_BOUND:
-                        runner = self._gpu_script_runner
-                    elif qj.category == JobCategory.CPU_BOUND:
-                        runner = self._cpu_script_runner
-                    if runner and runner.last_progress:
-                        p = runner.last_progress
-                        frame = p.get('frame', '')
-                        fps   = p.get('fps', '')
-                        tc    = p.get('out_time', '')
-                        speed = p.get('speed', '')
-                        if frame:
-                            rows.append(MenuRow(
-                                index=None,
-                                text=f"       [dim]◎ frame {frame}  fps {fps}  {tc}  {speed}[/dim]",
-                            ))
+                if qj.status == 'running' and self._script_runner.last_progress:
+                    p = self._script_runner.last_progress
+                    frame = p.get('frame', '')
+                    fps   = p.get('fps', '')
+                    tc    = p.get('out_time', '')
+                    speed = p.get('speed', '')
+                    if frame:
+                        rows.append(MenuRow(
+                            index=None,
+                            text=f"       [dim]◎ frame {frame}  fps {fps}  {tc}  {speed}[/dim]",
+                        ))
 
                 if selected:
                     # Inline detail section
