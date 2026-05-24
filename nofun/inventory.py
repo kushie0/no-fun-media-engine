@@ -16,7 +16,7 @@ __all__ = [
 
 # Age thresholds (days from recording date)
 EXPIRE_AGE     = 28   # cloud lease length; sync stops at this age, expiry deletes after
-RAW_EXPIRE_AGE = 10   # delete local raw video + audio after this many days
+RAW_EXPIRE_AGE = 5    # delete local raw video + audio after this many days
 
 import concurrent.futures
 import dataclasses

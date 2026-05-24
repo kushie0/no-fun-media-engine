@@ -2141,11 +2141,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 if target != dest.name:
                     dest.rename(dest.parent / target)
                     self.logger.info(
-                        f"SHARE   folder → {target}  (recording in progress)"
+                        f"SHARE   placeholder → {target}"
                     )
                 else:
                     self.logger.info(
-                        f"SHARE   folder ready: {dest.name}  (recording in progress)"
+                        f"SHARE   placeholder ready: {dest.name}"
                     )
             except OSError as e:
                 self.logger.warning(f"SHARE   could not create placeholder folder: {e}")

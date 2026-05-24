@@ -38,6 +38,27 @@ VenueLighting/
       (single multi-ch file)    └── pan filters → YYYYMMDD_Band_ch01.wav … → ZIP
 ```
 
+## Prod filesystem layout (`D:\`)
+
+All pipeline output lands on `D:\` (`mount_d`). Code references these paths
+via named attributes set in `Pipeline.__init__` (`media_engine.py`).
+
+| Folder | Code attribute | What lives here |
+|---|---|---|
+| `D:\videos\` | `vids_dest` | Encoded quadrant MP4s — output of `_encode_quadrants()` |
+| `D:\audio\` | `audio_dest` | Audio ZIP archives — output of `_export_audio_zips()` |
+| `D:\audio_archive\` | `audio_archive` | Split per-channel WAVs after processing; original multichannel WAVs after split. Cleaned up (deleted) once the corresponding ZIP exists in `D:\audio\` and age > `RAW_EXPIRE_AGE`. |
+| `D:\video_archive\` | `video_archive` | Source `.mov` files archived here after encoding. Cleaned up once ≥4 quad files exist and age > `RAW_EXPIRE_AGE`. |
+| `D:\clips\` | (via `paths.py`) | Short clip thumbnails — output of `_export_clips()`. |
+| `D:\logs\` | — | Rolling log files (`RemoteRotatingHandler`, 800 KB rotation per file). |
+| `D:\hard_paused\` | — | Partial encode outputs saved after a hard-stop PAUSE event. |
+
+**Expiry thresholds** (`nofun/inventory.py`):
+- `RAW_EXPIRE_AGE` — days before local raw files (`.mov` in `video_archive`, `.wav` in `audio_archive`) are deleted once outputs exist.
+- `EXPIRE_AGE` — days before cloud share media is removed from OneDrive.
+
+**Common confusion:** `audio_archive` is the *intermediate* WAV store, not the ZIP destination. ZIPs go to `audio_dest` (`D:\audio\`). If you see a large accumulation of `.wav` files in `D:\audio_archive\` with no corresponding ZIPs in `D:\audio\`, the zip step is stalled or failing for those performances.
+
 ## PAUSE state machine
 
 ```
