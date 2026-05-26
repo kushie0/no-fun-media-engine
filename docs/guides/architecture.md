@@ -95,6 +95,8 @@ push frame progress to the TUI and store the `Popen` handle for mid-encode kill.
 
 ## SharePoint / OneDrive lifecycle
 
+**Prod OneDrive path:** `C:\Users\NOFUNadmin\OneDrive - No Fun Troy LLC\Multitracks\`
+
 Files are shared with bands via a OneDrive folder (`OneDrive - No Fun Troy LLC/Multitracks/`).
 Each performance gets a date subfolder (`YY-MM-DD_BAND1_BAND2/`) containing quad MP4s, the
 audio ZIP, and a `_nofun_info.txt` manifest listing files and expiry date.
