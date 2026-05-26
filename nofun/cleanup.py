@@ -597,6 +597,12 @@ class CleanupMixin:
                 continue
 
             clips_dir = self.clips_dest / base
+            # Fall back to C:\clips so we don't flag clips that live on a
+            # secondary drive as missing (e.g. when clips_dest is D:\clips).
+            if not clips_dir.exists():
+                _alt = self.mount_c / 'clips' / base
+                if _alt.exists():
+                    clips_dir = _alt
             quads_present = [q for q in CAM_LABELS
                              if (self.vids_dest / f'{base}_{q}.mp4').exists()]
             counts = [
