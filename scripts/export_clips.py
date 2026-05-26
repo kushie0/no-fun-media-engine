@@ -166,7 +166,7 @@ def main() -> None:
 
     quad_tasks = [
         (source_dir / f'{args.base}_{q}.mp4', q)
-        for q in ('UL', 'UR', 'LL', 'LR')
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4')
         if (source_dir / f'{args.base}_{q}.mp4').exists()
         and (not per_quad_start or q in per_quad_start)
     ]

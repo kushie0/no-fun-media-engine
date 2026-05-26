@@ -73,7 +73,7 @@ def main() -> None:
 
     # Locate quad files
     quad_paths: dict[str, pathlib.Path] = {}
-    for q in ('UL', 'UR', 'LL', 'LR'):
+    for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
         candidate = quads_dir / f'{base}_{q}.mp4'
         if not candidate.exists():
             print(json.dumps({'status': 'error', 'reason': f'missing quad {q}', 'path': str(candidate)}))
@@ -81,11 +81,11 @@ def main() -> None:
         quad_paths[q] = candidate
 
     if not audio_path.exists():
-        print(json.dumps({'status': 'error', 'reason': 'FULLSET WAV missing', 'path': str(audio_path)}))
+        print(json.dumps({'status': 'error', 'reason': 'AUDIO WAV missing', 'path': str(audio_path)}))
         sys.exit(2)
 
-    # Probe dimensions from UL quad
-    ref = quad_paths['UL']
+    # Probe dimensions from CAM1 quad
+    ref = quad_paths['CAM1']
     try:
         w   = int(_probe(ref, 'width') or '0')
         h   = int(_probe(ref, 'height') or '0')
@@ -124,11 +124,11 @@ def main() -> None:
 
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        out_path = dest_dir / f'{base}_reel.mp4'
-        temp     = dest_dir / f'{base}_reel_temp.mp4'
+        out_path = dest_dir / f'{base}_INSTAGRAM.mp4'
+        temp     = dest_dir / f'{base}_INSTAGRAM_temp.mp4'
 
         seek_args = ['-ss', str(args.seek)] if args.seek else []
-        quads_list = [quad_paths[q] for q in ('UL', 'UR', 'LL', 'LR')]
+        quads_list = [quad_paths[q] for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4')]
 
         cmd = ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'warning',
                '-progress', 'pipe:2', '-nostats']

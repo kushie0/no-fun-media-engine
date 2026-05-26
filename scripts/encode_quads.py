@@ -62,7 +62,7 @@ def main() -> None:
         encoder_args = args.encoder.split()
 
     # Build ffmpeg command
-    quads = [('UL', 'ul'), ('UR', 'ur'), ('LL', 'll'), ('LR', 'lr')]
+    quads = [('CAM1', 'ul'), ('CAM2', 'ur'), ('CAM3', 'll'), ('CAM4', 'lr')]
     temps = {q: str(dest_dir / f'{args.base}_{q}_temp.mp4') for q, _ in quads}
 
     tlim = ['-t', str(args.trial)] if args.trial else []
