@@ -385,7 +385,7 @@ class AudioMixin:
         band = re.sub(r'_chan[\d.]*$', '', band)
         band = re.sub(r'_ch\d+$', '', band)
         band = re.sub(r'\.[0-9]+$', '', band)
-        band = re.sub(r'_(UL|UR|LL|LR)$', '', band, flags=re.IGNORECASE)
+        band = re.sub(r'_(CAM[1-4])$', '', band, flags=re.IGNORECASE)
         return f'{date}_{band}'
 
     def _create_and_verify_zip(self, zip_path: pathlib.Path,
@@ -505,7 +505,7 @@ class AudioMixin:
             drive is mounted: 'delete' queues them; 'archive' moves them to
             audio_archive.
         """
-        zip_path = zip_dest / f'{group_key}.zip'
+        zip_path = zip_dest / f'{group_key}_MULTITRACK.zip'
         if zip_path.exists() and not self.force:
             self.logger.debug(f"SKIP    {zip_path.name} (exists)")
             for f in files:

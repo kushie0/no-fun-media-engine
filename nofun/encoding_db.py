@@ -8,7 +8,7 @@ Usage::
 
     db = EncodingDB(pathlib.Path('encoding_db.json'))
     db.upsert('2026-03-20', 'OTOBO', 'quadrant_video', {
-        'path': str(path), 'quadrant': 'UL',
+        'path': str(path), 'quadrant': 'CAM1',
         'size': 123456, 'mtime': 1743280251.0,
         'scanned': '2026-03-31T14:20:00',
         **probe_file(path),

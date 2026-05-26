@@ -37,14 +37,14 @@ RECORDER_PAT = re.compile(
 SHORT_DATE   = re.compile(r'^(\d{2})-(\d{1,2})-(\d{1,2})(.*)')
 LONG_DATE    = re.compile(r'^(\d{4})(\d{2})(\d{2})(.*)')
 JUNK_SUFFIX  = re.compile(
-    r'(_chan[\d.]*|_ch\d+|Video\d*|Audio|h265|\.h265|\.mov|\.mp4|\.wav|\.zip|FULLSET|reel|temp|\d+|[._\s]|UL|UR|LL|LR)+$',
+    r'(_chan[\d.]*|_ch\d+|Video\d*|Audio|h265|\.h265|\.mov|\.mp4|\.wav|\.zip|AUDIO|INSTAGRAM|MULTITRACK|reel|FULLSET|temp|\d+|[._\s]|CAM\d+|UL|UR|LL|LR)+$',
     re.IGNORECASE
 )
 LEAD_JUNK = re.compile(r'^[_\s]+')
 INNER_WS  = re.compile(r'\s+')
-QUAD_RE = re.compile(r'_(UL|UR|LL|LR)\.mp4$', re.IGNORECASE)
-FULLSET_RE = re.compile(r'_FULLSET\b', re.IGNORECASE)
-REEL_RE    = re.compile(r'_reel\.mp4$', re.IGNORECASE)
+QUAD_RE = re.compile(r'_(CAM[1-4])\.mp4$', re.IGNORECASE)
+FULLSET_RE = re.compile(r'_AUDIO\b', re.IGNORECASE)
+REEL_RE    = re.compile(r'_INSTAGRAM\.mp4$', re.IGNORECASE)
 
 MEDIA_EXTS = {'.mov', '.mp4', '.wav', '.zip'}
 _MEDIA_EXT_RAW = frozenset({'mov', 'mp4', 'wav', 'zip'})  # without dot, for scandir loop
@@ -142,7 +142,7 @@ def extract_date_band_from_path(path: pathlib.Path) -> tuple[str, str]:
     """Like extract_date_band(path.stem), but falls back to the parent folder's
     YY-MM-DD prefix when the file itself has no date prefix.
 
-    SharePoint cloud copies are named ``BAND_UL.mp4`` (no date) — the date lives
+    SharePoint cloud copies are named ``BAND_CAM1.mp4`` (no date) — the date lives
     in the parent folder name like ``26-05-17_BAND_OTHER/``.
     """
     date, band = extract_date_band(path.stem)

@@ -1,9 +1,9 @@
 """nofun/reel.py — Instagram Reel generator (9:16 vertical video).
 
-Stacks the four quadrant MP4s vertically at native resolution (UL / UR / LL / LR),
+Stacks the four quadrant MP4s vertically at native resolution (CAM1 / CAM2 / CAM3 / CAM4),
 applies a continuous looping scroll using ffmpeg's crop filter with a time-varying
 y expression so that as the top quad exits the bottom one enters seamlessly,
-then crops to a 9:16 window. Mixes in the FULLSET WAV as audio.
+then crops to a 9:16 window. Mixes in the AUDIO MP3 as audio.
 
 Scroll speed: base is 10× slower than the legacy constant rate. Speed oscillates
 sinusoidally between 0.5× and 1.5× base on a 30-second cycle, giving a gentle
@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable
 
 from nofun.media_io import probe_stream, probe_format, run_ffmpeg, fmt_size
+from nofun.video import CAM_LABELS
 
 
 __all__ = ['generate_reel']
@@ -89,20 +90,20 @@ def generate_reel(
     proc_cb: Callable[[subprocess.Popen], None] | None = None,
     script_runner=None,   # ScriptRunner | None — uses scripts/generate_reel.py when set
 ) -> bool:
-    """Render a quad_w×1920 vertical reel from four quadrant MP4s + FULLSET WAV.
+    """Render a quad_w×1920 vertical reel from four quadrant MP4s + AUDIO MP3.
 
     Parameters
     ----------
-    quad_files  : {'UL': Path, 'UR': Path, 'LL': Path, 'LR': Path}
-    fullset_wav : path to the *_FULLSET.wav audio file
-    out_path    : desired final output path (e.g. reels_dest / '{base}_reel.mp4')
+    quad_files  : {'CAM1': Path, 'CAM2': Path, 'CAM3': Path, 'CAM4': Path}
+    fullset_wav : path to the *_AUDIO.mp3 audio file
+    out_path    : desired final output path (e.g. reels_dest / '{base}_INSTAGRAM.mp4')
     logger      : pipeline logger
     enc         : encoder config dict from build_encoder_config()
     trial_run   : if >0, encode only this many seconds (fast test)
 
     Returns True on success, False on failure.
     """
-    _order = ('UL', 'UR', 'LL', 'LR')
+    _order = CAM_LABELS
     missing = [k for k in _order if not (quad_files.get(k) and quad_files[k].exists())]
     if missing:
         logger.error(f"REEL  missing quad file(s): {', '.join(missing)}")
@@ -110,7 +111,7 @@ def generate_reel(
     quads = [quad_files[k] for k in _order]
 
     if not fullset_wav.exists():
-        logger.error(f"REEL  FULLSET WAV not found: {fullset_wav.name}")
+        logger.error(f"REEL  AUDIO not found: {fullset_wav.name}")
         return False
 
     # ------------------------------------------------------------------ probe
@@ -209,10 +210,10 @@ def generate_reel(
         # --- ScriptRunner path ---
         if script_runner is not None:
             from nofun.script_runner import ScriptJob
-            # base is out_path.stem e.g. '26-04-07_PRIZE.0_reel'.
+            # base is out_path.stem e.g. '26-04-07_PRIZE.0_INSTAGRAM'.
             # generate_reel.py constructs quad paths as '{base}_{quad}.mp4' and
-            # the output as '{base}_reel.mp4', so it needs the stem WITHOUT '_reel'.
-            quad_base = base[:-5] if base.endswith('_reel') else base
+            # the output as '{base}_INSTAGRAM.mp4', so it needs the stem WITHOUT '_INSTAGRAM'.
+            quad_base = base[:-10] if base.endswith('_INSTAGRAM') else base
             job = ScriptJob(
                 script='generate_reel',
                 args={

@@ -21,6 +21,7 @@ from nofun.inventory import (
     scan_files,
 )
 from nofun.media_io import DeleteQueue, fmt_size
+from nofun.video import CAM_LABELS
 
 
 # ---------------------------------------------------------------------------
@@ -51,11 +52,24 @@ _DATE_PREFIX_RE = re.compile(r'^(?:\d{2}-\d{1,2}-\d{1,2}|\d{8})_')
 def cloud_filename(src_name: str) -> str:
     """Strip the leading date prefix from a source filename for SharePoint upload.
 
-    Source files are named ``YY-M-D_BAND_UL.mp4`` or ``YYYYMMDD_BAND.zip``; the
+    Source files are named ``YY-M-D_BAND_CAM1.mp4`` or ``YYYYMMDD_BAND_MULTITRACK.zip``; the
     date is redundant in the cloud because the parent folder already carries it.
     Idempotent — if no date prefix is present, returns src_name unchanged.
     """
     return _DATE_PREFIX_RE.sub('', src_name, count=1)
+
+
+def expected_cloud_names(base: str, zip_src: pathlib.Path | None) -> list[str]:
+    """Cloud filenames a performance will have once encoded: 4 quads + audio ZIP.
+
+    base: source stem without the quad suffix (e.g. '26-05-24_BAND').
+    zip_src: the real ZIP path if it already exists; otherwise the name is
+             predicted from base (the date prefix is stripped either way).
+    Used to mark not-yet-produced files as "processing…" in _nofun_info.txt.
+    """
+    names = [cloud_filename(f'{base}_{q}.mp4') for q in CAM_LABELS]
+    names.append(cloud_filename(zip_src.name) if zip_src else cloud_filename(base) + '_MULTITRACK.zip')
+    return names
 
 
 def _band_token(raw_band: str) -> str:
@@ -206,6 +220,7 @@ def write_sharepoint_info(
     expire_date: datetime.date,
     is_cleaned: bool = False,
     new_files: list[pathlib.Path] | None = None,
+    expected_names: list[str] | None = None,
 ) -> None:
     """Update _nofun_info.txt in a SharePoint date folder.
 
@@ -213,6 +228,13 @@ def write_sharepoint_info(
     new_files: files that were just uploaded/re-uploaded this run — they get
                a new timestamp appended.  Defaults to all media_files if the
                file is being created for the first time, or new_files if provided.
+    expected_names: cloud filenames that *should* end up in this folder but
+               haven't been produced/copied yet (e.g. quads still encoding).
+               Each absent one is listed with a "processing…" marker so the
+               folder is informative during recording/encoding. Markers sit in
+               the size column (a file-entry line, never a timestamp sub-line),
+               so they carry no history and the file converges to the normal
+               present-only form once every expected file lands.
     """
     txt_path  = folder / '_nofun_info.txt'
     history   = _parse_file_timestamps(txt_path)
@@ -257,13 +279,24 @@ def write_sharepoint_info(
             f'files available until approx. {expire_str}',
             '',
         ]
-        for f in sorted(media_files, key=lambda x: x.name):
+        present    = {f.name: f for f in media_files}
+        processing = sorted(
+            n for n in (expected_names or [])
+            if n not in present and n != '_nofun_info.txt'
+        )
+        if processing:
+            lines += ['still processing — files appear here as they finish.', '']
+        for name in sorted(set(present) | set(processing)):
+            f = present.get(name)
+            if f is None:
+                lines.append(f'{_FILE_INDENT}{name:<52}  processing…')
+                continue
             try:
                 size = fmt_size(f.stat().st_size) if f.exists() else ''
-                lines.append(f'{_FILE_INDENT}{f.name:<52}  {size}')
+                lines.append(f'{_FILE_INDENT}{name:<52}  {size}')
             except OSError:
-                lines.append(f'{_FILE_INDENT}{f.name}')
-            for ts in history.get(f.name, []):
+                lines.append(f'{_FILE_INDENT}{name}')
+            for ts in history.get(name, []):
                 lines.append(f'{_TS_INDENT}{ts}')
 
     lines += ['', 'questions? hit up no fun staff.', '']
@@ -466,7 +499,7 @@ class CleanupMixin:
         for f in sorted(self.search_dir.glob('*.mov')):
             base = f.stem
             if all((self.vids_dest / f'{base}_{q}.mp4').exists()
-                   for q in ('UL', 'UR', 'LL', 'LR')):
+                   for q in CAM_LABELS):
                 findings.append(AuditFinding(
                     kind=FindingKind.REDUNDANT_SOURCE,
                     label=f'{base}: source .mov (quads complete)',
@@ -501,13 +534,13 @@ class CleanupMixin:
             return findings
         groups = self._group_wav_files(all_ch_wavs)  # type: ignore[attr-defined]  # AudioMixin
         for group_key, ch_files in groups.items():
-            if (self.audio_dest / f'{group_key}.zip').exists():
+            if (self.audio_dest / f'{group_key}_MULTITRACK.zip').exists():
                 total = sum(_safe_size(f) for f in ch_files)
                 findings.append(AuditFinding(
                     kind=FindingKind.ORPHANED_CHANNELS,
                     label=f'{group_key} ({len(ch_files)} ch)',
                     files=ch_files, action='delete',
-                    reason=f'zip exists: {group_key}.zip',
+                    reason=f'zip exists: {group_key}_MULTITRACK.zip',
                     size_bytes=total,
                 ))
         return findings
@@ -527,7 +560,7 @@ class CleanupMixin:
         groups = self._group_wav_files(all_hw_wavs)  # type: ignore[attr-defined]  # AudioMixin
         db = getattr(self, '_encoding_db', None)
         for group_key, ch_files in groups.items():
-            zip_exists = (self.audio_dest / f'{group_key}.zip').exists()
+            zip_exists = (self.audio_dest / f'{group_key}_MULTITRACK.zip').exists()
             all_silent = False
             if not zip_exists and db is not None:
                 parts = group_key.split('_', 1)
@@ -538,7 +571,7 @@ class CleanupMixin:
                     all_silent = bool(perf_db and perf_db.get('audio_all_silent'))
             if not (zip_exists or all_silent):
                 continue
-            reason = (f'zip exists: {group_key}.zip' if zip_exists else 'all-silent (DB)')
+            reason = (f'zip exists: {group_key}_MULTITRACK.zip' if zip_exists else 'all-silent (DB)')
             total = sum(_safe_size(f) for f in ch_files)
             findings.append(AuditFinding(
                 kind=FindingKind.ORPHANED_CHANNELS,
@@ -554,9 +587,9 @@ class CleanupMixin:
         """Performances with complete quadrants but missing or incomplete clip files."""
         findings = []
         now = datetime.datetime.now().timestamp()
-        quad_bases = {f.stem[:-3] for f in self.vids_dest.glob('*_UL.mp4')}
+        quad_bases = {f.stem[:-5] for f in self.vids_dest.glob('*_CAM1.mp4')}
         for base in sorted(quad_bases):
-            ul_file = self.vids_dest / f'{base}_UL.mp4'
+            ul_file = self.vids_dest / f'{base}_CAM1.mp4'
             try:
                 if now - ul_file.stat().st_mtime < 3600:
                     continue
@@ -564,7 +597,7 @@ class CleanupMixin:
                 continue
 
             clips_dir = self.clips_dest / base
-            quads_present = [q for q in ('UL', 'UR', 'LL', 'LR')
+            quads_present = [q for q in CAM_LABELS
                              if (self.vids_dest / f'{base}_{q}.mp4').exists()]
             counts = [
                 sum(1 for p in clips_dir.glob(f'{base}_{q}_*.mp4')
@@ -592,7 +625,7 @@ class CleanupMixin:
         for clips_dir in sorted(d for d in self.clips_dest.iterdir() if d.is_dir()):
             base = clips_dir.name
             if not any((self.vids_dest / f'{base}_{q}.mp4').exists()
-                       for q in ('UL', 'UR', 'LL', 'LR')):
+                       for q in CAM_LABELS):
                 clip_files = list(clips_dir.rglob('*.mp4'))
                 total = sum(_safe_size(f) for f in clip_files)
                 findings.append(AuditFinding(
@@ -684,7 +717,7 @@ class CleanupMixin:
                 continue
             # Only flag if all 4 quads exist in vids_dest
             base = mov.stem
-            quads = [self.vids_dest / f'{base}_{q}.mp4' for q in ('UL', 'UR', 'LL', 'LR')]
+            quads = [self.vids_dest / f'{base}_{q}.mp4' for q in CAM_LABELS]
             if not all(q.exists() for q in quads):
                 continue
             if not self._quads_verified(base):
@@ -708,12 +741,13 @@ class CleanupMixin:
             return findings
         today = datetime.date.today()
 
-        # Build set of ZIP stems in audio_dest (keyed directly so long-date names
-        # like '2026-04-06_ALTAR.zip' match the date_str+band from WAV filenames)
+        # Build set of ZIP perf keys in audio_dest.
+        # Strip _MULTITRACK suffix so '2026-04-06_ALTAR_MULTITRACK' keyed as
+        # '2026-04-06_ALTAR' — the form that extract_date_band(wav.stem) returns.
         zip_stems: set[str] = set()
         if self.audio_dest.is_dir():
             for zf in self.audio_dest.glob('*.zip'):
-                zip_stems.add(zf.stem)
+                zip_stems.add(zf.stem.removesuffix('_MULTITRACK'))
 
         # Group WAVs by (date, band), age-gated and ZIP-gated
         groups: dict[tuple[str, str], list[pathlib.Path]] = {}
@@ -755,7 +789,7 @@ class CleanupMixin:
         Uses probe_video() which reads only container headers (~0.1s per file).
         Returns False if any quadrant is missing or its codec probes as 'unknown'.
         """
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in CAM_LABELS:
             path = self.vids_dest / f'{base}_{q}.mp4'
             if not path.exists():
                 return False
@@ -770,7 +804,7 @@ class CleanupMixin:
         Checks: file exists, non-zero size, zipfile.namelist() returns ≥1 entry.
         BadZipFile and OSError both return False — raw file is kept.
         """
-        zip_path = self.audio_dest / f'{perf_key}.zip'
+        zip_path = self.audio_dest / f'{perf_key}_MULTITRACK.zip'
         if not zip_path.exists() or zip_path.stat().st_size == 0:
             return False
         try:
@@ -964,7 +998,7 @@ class CleanupMixin:
                 for f in finding.files:
                     self.delete_queue.add(f, finding.reason, self.logger)
             elif finding.action == 'reprocess':
-                base = finding.files[0].stem[:-3]  # strip _UL
+                base = finding.files[0].stem.rsplit('_', 1)[0]  # strip _CAM1
                 self._export_clips(base)  # type: ignore[attr-defined]
 
     def _cleanup_scan(self) -> None:

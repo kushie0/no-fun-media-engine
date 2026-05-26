@@ -327,14 +327,14 @@ TESTS: list[dict] = [
     },
     {
         'id':    'remaster_command_001',
-        'title': 'REMASTER regenerates FULLSET WAV from the selected show\'s ZIP',
+        'title': 'REMASTER regenerates AUDIO WAV from the selected show\'s ZIP',
         'instructions': (
             'This test requires a show with a ZIP file already in the audio destination. '
             'Skip with OK if none is available.\n\n'
             'To test: type INVENTORY, expand a show with a ZIP (type its number), '
             'then type REMASTER.\n\n'
             'Pass if: the status bar shows "remastering…", a REMASTER log line appears, '
-            'and a _FULLSET.wav file is written to the audio destination folder. '
+            'and a _AUDIO.mp3 file is written to the audio destination folder. '
             'Type HOME when done.'
         ),
     },
@@ -357,7 +357,7 @@ TESTS: list[dict] = [
         'instructions': (
             'Channels are now cross-correlated against the first available channel before '
             'mixing, compensating for hardware ADC timing offsets. '
-            'This test requires a FULLSET render with DEBUG output visible.\n\n'
+            'This test requires a AUDIO render with DEBUG output visible.\n\n'
             'To test: run uv run python -m nofun.mastering <folder> --clip 60 120 '
             'and check the DEBUG output.\n\n'
             'Pass if: a line appears showing "alignment — lags (ms): ch29:+0.0, ch31:±X.X, '
@@ -384,16 +384,16 @@ TESTS: list[dict] = [
     },
     {
         'id':    'reel_001',
-        'title': 'REEL generates a 1080×1920 vertical video with scrolling quads and FULLSET audio',
+        'title': 'REEL generates a 1080×1920 vertical video with scrolling quads and AUDIO audio',
         'instructions': (
-            'This test requires a show with all four quadrant MP4s and a _FULLSET.wav in '
+            'This test requires a show with all four quadrant MP4s and a _AUDIO.mp3 in '
             'the audio destination. Skip with OK if none is available.\n\n'
-            'To test: type INVENTORY, expand a show that has quads + FULLSET WAV (type its '
+            'To test: type INVENTORY, expand a show that has quads + AUDIO WAV (type its '
             'number), then type REEL.\n\n'
             'Pass if: the status bar shows "REEL running", a REEL log line appears, and a '
-            '_reel.mp4 file is written to the reels/ destination folder. Open the file and '
+            '_INSTAGRAM.mp4 file is written to the reels/ destination folder. Open the file and '
             'confirm it is 1080×1920, the four quads scroll slowly from top to bottom, and '
-            'the FULLSET audio plays throughout. Type HOME when done.'
+            'the AUDIO audio plays throughout. Type HOME when done.'
         ),
     },
     {
@@ -411,13 +411,13 @@ TESTS: list[dict] = [
     },
     {
         'id':    'remaster_reel_and_sharepoint_001',
-        'title': 'REMASTER copies FULLSET WAV to SharePoint and logs skipped reels',
+        'title': 'REMASTER copies AUDIO WAV to SharePoint and logs skipped reels',
         'instructions': (
             'This test requires a show that has been processed (quads in vids_dest '
             'and a ZIP in audio_dest). Skip with OK if none is available.\n\n'
             'To test: type STATUS, expand a processed show, then type REMASTER. '
             'Observe the log for SHARE lines and any REEL-skipped warnings.\n\n'
-            'Pass if: the log shows "SHARE   …_FULLSET.wav → <date-folder>" after '
+            'Pass if: the log shows "SHARE   …_AUDIO.mp3 → <date-folder>" after '
             'mastering completes, and a reel video appears in vids_dest (or a '
             '"REEL skipped — missing quad(s):" warning appears if quads are absent). '
             'Type HOME when done.'
@@ -442,10 +442,10 @@ TESTS: list[dict] = [
         'id':    'reel_progress_cb_001',
         'title': 'REEL encode shows live progress in TUI and can be interrupted by PAUSE',
         'instructions': (
-            'This test requires a show with all four quad MP4s and a FULLSET WAV '
+            'This test requires a show with all four quad MP4s and a AUDIO WAV '
             'present. Skip with OK if none is available.\n\n'
             'To test: run REMASTER on a date that has a complete set of quads and '
-            'a FULLSET WAV. Once the REEL encode starts (status bar shows '
+            'a AUDIO WAV. Once the REEL encode starts (status bar shows '
             '"REEL  name  [1/N]"), watch the progress row at the bottom of the TUI.\n\n'
             'Pass if: the progress row ticks with frame/fps/timecode/speed data '
             'throughout the REEL encode (not blank/frozen), and typing PAUSE during '
@@ -485,7 +485,7 @@ TESTS: list[dict] = [
             'with random cosine-eased bursts up to 4× base every 10–40 seconds (2–5 s hold, '
             '3.5 s ramp each side).\n\n'
             'To test: run REMASTER on any show to produce a reel. Play back the resulting '
-            '_reel.mp4 at normal speed and watch the scroll motion for at least 90 seconds.\n\n'
+            '_INSTAGRAM.mp4 at normal speed and watch the scroll motion for at least 90 seconds.\n\n'
             'Pass if: the base scroll is visibly very slow; the video occasionally drifts '
             'noticeably faster for a few seconds then eases back smoothly — with no jarring '
             'jumps at the transitions. Type HOME when done.'
@@ -500,20 +500,20 @@ TESTS: list[dict] = [
             'and the strip is now doubled to allow seamless y-wrap.\n\n'
             'To test: run REMASTER on any show. Watch the log for "REEL  ffmpeg spawned" '
             'followed by frame progress (not immediate failure).\n\n'
-            'Pass if: the reel encode runs to completion and produces a _reel.mp4 file '
+            'Pass if: the reel encode runs to completion and produces a _INSTAGRAM.mp4 file '
             'with visible slow scrolling. Type HOME when done.'
         ),
     },
     {
         'id':    'remaster_fullset_mp3_001',
-        'title': 'REMASTER generates FULLSET as 128 kbps MP3 instead of WAV',
+        'title': 'REMASTER generates AUDIO as 128 kbps MP3 instead of WAV',
         'instructions': (
-            'REMASTER now writes FULLSET audio as _FULLSET.mp3 (128 kbps CBR) '
-            'instead of _FULLSET.wav.\n\n'
+            'REMASTER now writes AUDIO audio as _AUDIO.mp3 (128 kbps CBR) '
+            'instead of _AUDIO.mp3.\n\n'
             'To test: run REMASTER on a show that requires ZIP extraction '
-            '(delete any existing FULLSET file first). Wait for REMASTER to complete.\n\n'
-            'Pass if: a _FULLSET.mp3 file appears in the audio destination folder '
-            '(D:\\audio\\) and no _FULLSET.wav is created. The REEL encode should '
+            '(delete any existing AUDIO file first). Wait for REMASTER to complete.\n\n'
+            'Pass if: a _AUDIO.mp3 file appears in the audio destination folder '
+            '(D:\\audio\\) and no _AUDIO.mp3 is created. The REEL encode should '
             'still succeed using the MP3 as audio input. Type HOME when done.'
         ),
     },
@@ -552,8 +552,8 @@ TESTS: list[dict] = [
             'h264_amf silently rejected portrait (320×568) output with AVERROR(EINVAL). '
             'REEL now always encodes with libx264 -preset fast -crf 23.\n\n'
             'To test: trigger a REEL encode (run the pipeline on a show that has all four '
-            'quad files and a FULLSET MP3, or use --trial-run for a short test).\n\n'
-            'Pass if: the REEL encode completes successfully and a _reel.mp4 file appears '
+            'quad files and a AUDIO MP3, or use --trial-run for a short test).\n\n'
+            'Pass if: the REEL encode completes successfully and a _INSTAGRAM.mp4 file appears '
             'in the video destination folder without any rc=-22 failure in the log. '
             'Type HOME when done.'
         ),
@@ -583,7 +583,7 @@ TESTS: list[dict] = [
             'REEL now uses a single-term sinusoidal velocity integral: '
             'y(t) = (base·t + B/ω·(1−cos(ω·t))) % strip_h — about 50 characters.\n\n'
             'To test: trigger a REEL encode on any show (--trial-run is fine).\n\n'
-            'Pass if: the encode completes without error and a _reel.mp4 appears in the '
+            'Pass if: the encode completes without error and a _INSTAGRAM.mp4 appears in the '
             'video destination. No "[Eval] Missing \')\'" or rc=-22 in the log. '
             'Type HOME when done.'
         ),
@@ -592,11 +592,11 @@ TESTS: list[dict] = [
         'id':    'remaster_skip_mp3_001',
         'title': 'REMASTER skips ZIP extract when MP3 exists; second press forces from scratch',
         'instructions': (
-            'REMASTER now skips MP3 generation if the FULLSET MP3 already exists and '
+            'REMASTER now skips MP3 generation if the AUDIO MP3 already exists and '
             'goes straight to the reel. A second REMASTER press (while it is running) '
             'kills the current encode and restarts everything from scratch.\n\n'
-            'To test: expand a show that already has FULLSET MP3s, type REMASTER. '
-            'Confirm the log shows "using existing FULLSET (skipping ZIP extract)" and '
+            'To test: expand a show that already has AUDIO MP3s, type REMASTER. '
+            'Confirm the log shows "using existing AUDIO (skipping ZIP extract)" and '
             'the reel starts immediately. Then expand a show with no MP3s, type REMASTER '
             'and confirm ZIP extraction runs. Finally type REMASTER a second time right '
             'after it starts to confirm it restarts from scratch with "forcing from scratch".\n\n'
@@ -643,13 +643,13 @@ TESTS: list[dict] = [
     },
     {
         'id':    'inventory_no_fullset_reel_001',
-        'title': 'FULLSET WAVs and reel MP4s do not appear as phantom bands in INVENTORY',
+        'title': 'AUDIO WAVs and reel MP4s do not appear as phantom bands in INVENTORY',
         'instructions': (
-            'This test requires a show that has been REMASTER-ed (FULLSET WAVs and/or '
+            'This test requires a show that has been REMASTER-ed (AUDIO WAVs and/or '
             'a reel MP4 exist in D:/audio/ or D:/videos/). Skip with OK if none.\n\n'
             'To test: type BIGSCAN, wait for it to finish, then type INVENTORY.\n\n'
             'Pass if: the show appears once with its real band names only — no extra '
-            'entries like "MX_LONELY_FULLSET" or "PFC_PRIZE_reel", and the show name '
+            'entries like "MX_LONELY_AUDIO" or "PFC_PRIZE_INSTAGRAM", and the show name '
             'does not contain repeated band tokens. Type HOME when done.'
         ),
     },
@@ -687,7 +687,7 @@ TESTS: list[dict] = [
             'automatically — any band key that no longer appears in the filesystem '
             'scan for that date is deleted. Only dates with files present are touched; '
             'unmounted drives are never affected.\n\n'
-            'To test: if a show previously had phantom bands (e.g. MX_LONELY_FULLSET), '
+            'To test: if a show previously had phantom bands (e.g. MX_LONELY_AUDIO), '
             'run BIGSCAN (double-press REBUILD) and check the log. '
             'Skip with OK if no phantom bands are known.\n\n'
             'Pass if: the log shows "REBUILD  pruned N stale band entries from encoding DB" '
@@ -728,8 +728,8 @@ TESTS: list[dict] = [
             'The reel generation in REMASTER now runs through '
             'scripts/generate_reel.py via ScriptRunner when available.\n\n'
             'To test: trigger REMASTER on a show that has quad MP4s and a '
-            'FULLSET WAV. Wait for reel generation to complete.\n\n'
-            'Pass if: the _reel.mp4 file appears in the output directory. '
+            'AUDIO WAV. Wait for reel generation to complete.\n\n'
+            'Pass if: the _INSTAGRAM.mp4 file appears in the output directory. '
             'The debug log should show "REEL  ScriptRunner: generate_reel" '
             'instead of the old "REEL  ffmpeg spawned" label. Type HOME when done.'
         ),
@@ -1207,12 +1207,12 @@ TUTORIAL_STEPS: list[dict] = [
         'instructions': (
             'After all AUTOMATIC jobs (REENCODE + AUDIO) for a band finish, the '
             'pipeline now auto-enqueues a REMASTER job (which also renders the REEL). '
-            'Each band is only auto-enqueued once per session; if a FULLSET MP3 already '
+            'Each band is only auto-enqueued once per session; if a AUDIO MP3 already '
             'exists the band is skipped. Manual REMASTER still works as before.\n\n'
             'To test: drop a .mov and channel WAVs for a new band into VenueLighting '
             'and wait for encoding and audio ZIP to complete. Watch the JOBS menu.\n\n'
             'Pass if: a REMASTER job for that band appears automatically in the JOBS '
-            'menu after the AUDIO job completes, and the FULLSET MP3 and REEL file '
+            'menu after the AUDIO job completes, and the AUDIO MP3 and REEL file '
             'appear in the audio folder when it finishes. Type HOME when done.'
         ),
     },
@@ -1418,7 +1418,7 @@ TUTORIAL_STEPS: list[dict] = [
             'To test: type REMASTER on a date with such a band and wait for both '
             'REMASTER and REEL jobs to finish in the JOBS list.\n\n'
             'Pass if: two reel MP4 files appear in D:\\videos\\ — one per session '
-            '(e.g. 26-04-17_ANIMENIGHT10.0_reel.mp4 and 26-04-17_ANIMENIGHT11.0_reel.mp4). '
+            '(e.g. 26-04-17_ANIMENIGHT10.0_INSTAGRAM.mp4 and 26-04-17_ANIMENIGHT11.0_INSTAGRAM.mp4). '
             'Type HOME when done.'
         ),
     },
@@ -1444,7 +1444,7 @@ TUTORIAL_STEPS: list[dict] = [
             'To test: run the pipeline on a show with WAV files present. Wait for the '
             'AUDIO job to finish, then watch for the REMASTER job in JOBS.\n\n'
             'Pass if: REMASTER runs to completion (JobQueue: finish … REMASTER) and a '
-            '_FULLSET.mp3 appears in the audio destination folder. Type HOME when done.'
+            '_AUDIO.mp3 appears in the audio destination folder. Type HOME when done.'
         ),
     },
     {

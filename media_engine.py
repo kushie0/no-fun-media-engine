@@ -56,6 +56,7 @@ from nofun.media_io import (
 from nofun.cleanup import (
     canonical_sharepoint_name,
     cloud_filename,
+    expected_cloud_names,
     make_sharepoint_folder_name,
     write_sharepoint_info,
 )
@@ -67,6 +68,7 @@ from nofun.inventory import (
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory, JobQueue
 from nofun.state import MenuMode, PauseState
+from nofun.video import CAM_LABELS
 from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
 
 # ---------------------------------------------------------------------------
@@ -616,7 +618,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
           - the 4 quadrant MP4s from vids_dest/
           - the matching audio ZIP from audio_dest/ (matched by date+band, not exact filename,
             so date-format differences between quad names and zip names are tolerated)
-        Skips a specific performance only if its UL quad file already exists in the folder.
+        Skips a specific performance only if its CAM1 quad file already exists in the folder.
         """
         if not self.sharepoint_dest or not self.sharepoint_dest.is_dir():
             return
@@ -636,8 +638,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # Collect all (date_prefix, date_str, band, rec_date, ul_file) tuples — used
         # both for file copying and for the post-loop folder rename reconciliation.
         eligible: list[tuple[str, str, str, datetime.date, pathlib.Path]] = []
-        for ul_file in sorted(self.vids_dest.glob('*_UL.mp4')):
-            base = ul_file.stem[:-3]
+        for ul_file in sorted(self.vids_dest.glob('*_CAM1.mp4')):
+            base = ul_file.stem[:-5]
             date_str, band = extract_date_band(base)
             if date_str == 'TBD':
                 continue
@@ -651,9 +653,18 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             date_prefix = rec_date.strftime('%y-%m-%d')
             eligible.append((date_prefix, date_str, band, rec_date, ul_file))
 
+        # Cloud filenames each date folder should eventually hold (all bands).
+        # Passed to write_sharepoint_info so files not yet copied keep showing
+        # as "processing…" through partial syncs; once all land the marker set
+        # is empty and the info file matches the normal present-only form.
+        expected_by_prefix: dict[str, set[str]] = {}
+        for e_prefix, e_date, e_band, _, e_ul in eligible:
+            names = expected_by_prefix.setdefault(e_prefix, set())
+            names.update(expected_cloud_names(e_ul.stem[:-5], zip_by_perf.get((e_date, e_band))))
+
         # --- File copy pass ---
         for date_prefix, date_str, band, rec_date, ul_file in eligible:
-            base = ul_file.stem[:-3]
+            base = ul_file.stem[:-5]
             dest = (
                 self._find_date_folder(self.sharepoint_dest, date_prefix)
                 or self.sharepoint_dest / date_prefix
@@ -668,7 +679,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
             quads = [] if ul_done else [
                 q for q in
-                [self.vids_dest / f'{base}_{q}.mp4' for q in ('UL', 'UR', 'LL', 'LR')]
+                [self.vids_dest / f'{base}_{q}.mp4' for q in CAM_LABELS]
                 if q.exists()
             ]
             if not quads and zip_done:
@@ -721,6 +732,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     dest, media_in_dest,
                     expire_date=expire_date,
                     new_files=newly_copied,
+                    expected_names=sorted(expected_by_prefix.get(date_prefix, set())),
                 )
             except OSError as e:
                 self.logger.warning(f"SHARE   could not write info file: {e}")
@@ -825,12 +837,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             shutil.copy(src, dst)
 
         # Quads — all performances (e.g. .1, .2) for this band on this date
-        for ul_file in sorted(self.vids_dest.glob('*_UL.mp4')):
-            base      = ul_file.stem[:-3]   # strip _UL
+        for ul_file in sorted(self.vids_dest.glob('*_CAM1.mp4')):
+            base      = ul_file.stem[:-5]   # strip _CAM1
             d, b      = extract_date_band(base)
             if d != date_str or b != band:
                 continue
-            for q in ('UL', 'UR', 'LL', 'LR'):
+            for q in CAM_LABELS:
                 quad = self.vids_dest / f'{base}_{q}.mp4'
                 if quad.exists():
                     cloud_dst = dest / cloud_filename(quad.name)
@@ -942,7 +954,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         """Perform mastering + reel for a single band (one MANUAL queue job).
 
         ps is a PerformanceState captured at enqueue time.
-        force=False: skip ZIP extraction if a FULLSET MP3 already exists.
+        force=False: skip ZIP extraction if an AUDIO MP3 already exists.
         force=True: redo everything from scratch.
         """
         import tempfile, zipfile as _zf
@@ -987,12 +999,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
         _TEST_SEEK = 900.0  # 15 min in
         existing_fullset = (
-            self.audio_dest / f'{base}_FULLSET.mp3'
-            if (self.audio_dest / f'{base}_FULLSET.mp3').exists()
+            self.audio_dest / f'{base}_AUDIO.mp3'
+            if (self.audio_dest / f'{base}_AUDIO.mp3').exists()
             else None
         )
         if existing_fullset and not force:
-            self.logger.info(f"REMASTER  {base}  using existing FULLSET (skipping ZIP extract)")
+            self.logger.info(f"REMASTER  {base}  using existing AUDIO (skipping ZIP extract)")
             results = [existing_fullset]
         else:
             try:
@@ -1017,7 +1029,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self._clear_op('remaster')
                 return
 
-        # Copy FULLSET to SharePoint date folder
+        # Copy AUDIO to SharePoint date folder
         if self.sharepoint_dest and self.sharepoint_dest.is_dir():
             from nofun.inventory import extract_date_band as _edb
             for wav_path in results:
@@ -1121,7 +1133,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         vid_lines = []
         for f in sorted(self.search_dir.glob('*.mov')):
             base = f.stem
-            vid_lines.append(f"    {base}_UL/UR/LL/LR.mp4  (4 quadrants)")
+            vid_lines.append(f"    {base}_CAM1/CAM2/CAM3/CAM4.mp4  (4 quadrants)")
             if self.mount_d != pathlib.Path('.'):
                 vid_lines.append(f"    {f.name}  (original, moved here)")
         if vid_lines:
@@ -1365,15 +1377,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
                 elif category == 'quadrant_video':
                     quad_label = None
-                    for q in ('UL', 'UR', 'LL', 'LR'):
+                    for q in CAM_LABELS:
                         if p.stem.endswith(f'_{q}'):
                             quad_label = q
                             break
-                    rec['quadrant'] = quad_label or p.stem[-2:]
+                    rec['quadrant'] = quad_label or p.stem[-4:]
 
-                    # Non-UL quads: copy metadata from UL if already probed
-                    if quad_label and quad_label != 'UL':
-                        ul_path = p.parent / (p.stem[:-len(quad_label)] + f'UL{p.suffix}')
+                    # Non-CAM1 quads: copy metadata from CAM1 if already probed
+                    if quad_label and quad_label != 'CAM1':
+                        ul_path = p.parent / (p.stem[:-len(quad_label)] + f'CAM1{p.suffix}')
                         ul_rec  = self._encoding_db.lookup(ul_path)
                         if ul_rec and ul_rec.get('codec') and not self._encoding_db.is_stale(ul_rec, ul_path):
                             for field in ('codec', 'resolution', 'duration',
@@ -2140,6 +2152,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 target = canonical_sharepoint_name(date_prefix, all_bands)
                 if target != dest.name:
                     dest.rename(dest.parent / target)
+                    dest = dest.parent / target
                     self.logger.info(
                         f"SHARE   placeholder → {target}"
                     )
@@ -2150,6 +2163,33 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             except OSError as e:
                 self.logger.warning(f"SHARE   could not create placeholder folder: {e}")
                 continue
+
+            # Write an in-progress info file so the folder is informative while
+            # the band is still recording / encoding. Lists the cloud filenames
+            # we expect (4 quads + audio ZIP per band) with a "processing…"
+            # marker; SYNC overwrites this with the final form as files land.
+            y, mo, d  = date_str.split('-')  # validated when new_by_date was built
+            rec_date  = datetime.date(int(y), int(mo), int(d))
+            expected: set[str] = set()
+            for mov in all_movs:
+                m_date, m_band = extract_date_band(mov.stem)
+                if m_date != date_str or not m_band or m_band.upper() in ('NOFUN', 'TBD'):
+                    continue
+                expected.update(expected_cloud_names(mov.stem, None))
+            if expected:
+                try:
+                    media_in_dest = [
+                        f for f in dest.iterdir()
+                        if f.is_file() and f.name != '_nofun_info.txt'
+                    ]
+                    write_sharepoint_info(
+                        dest, media_in_dest,
+                        expire_date=rec_date + datetime.timedelta(days=EXPIRE_AGE),
+                        new_files=[],
+                        expected_names=sorted(expected),
+                    )
+                except OSError as e:
+                    self.logger.warning(f"SHARE   could not write placeholder info file: {e}")
 
             for band in new_bands:
                 self._sp_placeholder_done.add((date_str, band))
@@ -2438,8 +2478,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         """Export proxy clips for all quad files belonging to perf."""
         parts = perf.split('_', 1)
         prefix = parts[0]  # date portion e.g. "26-04-11"
-        for ul_file in sorted(self.vids_dest.glob(f'{prefix}*_UL.mp4')):
-            base = ul_file.stem[:-3]  # strip "_UL"
+        for ul_file in sorted(self.vids_dest.glob(f'{prefix}*_CAM1.mp4')):
+            base = ul_file.stem[:-5]  # strip "_CAM1"
             if self._pause_state in (PauseState.SOFT_PENDING, PauseState.HARD_PENDING):
                 break
             self._export_clips(base)
@@ -2492,7 +2532,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         parts = perf.split('_', 1)
         prefix = parts[0]
         quad_files = [
-            f for q in ('UL', 'UR', 'LL', 'LR')
+            f for q in CAM_LABELS
             for f in sorted(self.vids_dest.glob(f'{prefix}*_{q}.mp4'))
         ]
         if not quad_files:
@@ -2518,25 +2558,25 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self.logger.info(f"SYNC    {perf}  audio done")
 
     def _do_reel_for_perf(self, perf: str) -> None:
-        """Render one reel per quad set for perf using the shared FULLSET MP3.
+        """Render one reel per quad set for perf using the shared AUDIO MP3.
 
         A band can have multiple sessions on the same date (multiple quad sets);
-        each gets its own reel file named after the quad base (e.g. *10.0_reel.mp4).
+        each gets its own reel file named after the quad base (e.g. *10.0_INSTAGRAM.mp4).
         """
         from nofun.reel import generate_reel
         base    = perf  # perf key matches zip/audio base name
-        fullset = self.audio_dest / f'{base}_FULLSET.mp3'
+        fullset = self.audio_dest / f'{base}_AUDIO.mp3'
         if not fullset.exists():
             upstream = self._remaster_status.get(perf)
             if upstream == 'no_zip':
                 self.logger.warning(
                     f"REEL  skipped for {base} — upstream REMASTER had no ZIP "
-                    f"(AUDIO job hasn't produced {base}.zip yet)"
+                    f"(AUDIO job hasn't produced {base}_MULTITRACK.zip yet)"
                 )
             elif upstream == 'zip_empty':
                 self.logger.warning(
                     f"REEL  skipped for {base} — upstream REMASTER found an "
-                    f"empty ZIP (no WAVs inside {base}.zip)"
+                    f"empty ZIP (no WAVs inside {base}_MULTITRACK.zip)"
                 )
             elif upstream == 'mastering_error':
                 self.logger.warning(
@@ -2545,28 +2585,28 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 )
             else:
                 self.logger.warning(
-                    f"REEL  skipped — FULLSET not found: {fullset.name} "
+                    f"REEL  skipped — AUDIO not found: {fullset.name} "
                     f"(upstream REMASTER status: {upstream or 'unknown'})"
                 )
             return
 
-        # Collect all UL quad files; each represents a separate session.
-        ul_candidates = sorted(self.vids_dest.glob(f'{base}*_UL.mp4'))
+        # Collect all CAM1 quad files; each represents a separate session.
+        ul_candidates = sorted(self.vids_dest.glob(f'{base}*_CAM1.mp4'))
         if not ul_candidates:
-            self.logger.warning(f"REEL  skipped for {base} — no UL quad found")
+            self.logger.warning(f"REEL  skipped for {base} — no CAM1 quad found")
             return
 
         for ul in ul_candidates:
-            real_base = ul.stem[:-3]  # strip trailing "_UL"
+            real_base = ul.stem[:-5]  # strip trailing "_CAM1"
             quad_map  = {q: self.vids_dest / f'{real_base}_{q}.mp4'
-                         for q in ('UL', 'UR', 'LL', 'LR')}
+                         for q in CAM_LABELS}
             missing = [q for q, p in quad_map.items() if not p.exists()]
             if missing:
                 self.logger.warning(
                     f"REEL  skipped for {real_base} — missing quad(s): {', '.join(missing)}"
                 )
                 continue
-            out = self.vids_dest / f'{real_base}_reel.mp4'
+            out = self.vids_dest / f'{real_base}_INSTAGRAM.mp4'
             self.logger.info(f"REEL  {out.stem}")
             self._set_op('remaster', f'REEL  {out.stem}')
             _HB_INTERVAL = 60.0
@@ -2610,8 +2650,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self._sync_perf_files(perf, [out])
 
     def _sync_perf_reel(self, perf: str) -> None:
-        """Copy the reel MP4(s) for perf to SharePoint."""
-        reel_files = list(self.vids_dest.glob(f'{perf}*_reel.mp4'))
+        """Copy the Instagram reel MP4(s) for perf to SharePoint."""
+        reel_files = list(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
         self._sync_perf_files(perf, reel_files)
 
     def _build_full_manifest(
@@ -2666,7 +2706,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         encode_ids: list[str] = []
         for mov in mov_list:
             base = mov.stem
-            _quads = [self.vids_dest / f'{base}_{q}.mp4' for q in ('UL', 'UR', 'LL', 'LR')]
+            _quads = [self.vids_dest / f'{base}_{q}.mp4' for q in CAM_LABELS]
             if all(p.exists() for p in _quads) and not self.force:
                 continue
             job = _ScriptJob(
@@ -2684,7 +2724,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # --- 2. Audio processing job (CPU_BOUND, priority=10) ---
         audio_ids: list[str] = []
         if ch_files or sd_files or au_files:
-            _zip_path = self.audio_dest / f'{perf}.zip'
+            _zip_path = self.audio_dest / f'{perf}_MULTITRACK.zip'
             if not (_zip_path.exists() and not self.force):
                 ch, sd, au = list(ch_files), list(sd_files), list(au_files)
                 job = _ScriptJob(
@@ -2717,7 +2757,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 and any((self.clips_dest / mov.stem).glob('*.mp4'))
                 for mov in mov_list
                 if all((self.vids_dest / f'{mov.stem}_{q}.mp4').exists()
-                       for q in ('UL', 'UR', 'LL', 'LR'))
+                       for q in CAM_LABELS)
             )
             if not (_clips_done and not self.force):
                 job = _ScriptJob(
@@ -2765,7 +2805,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # --- 6. Remaster (MANUAL, priority=50, depends on encode + audio) ---
         remaster_deps = encode_ids + audio_ids
         master_id: str | None = None
-        _fullset = self.audio_dest / f'{perf}_FULLSET.mp3'  # also needed by step 7
+        _fullset = self.audio_dest / f'{perf}_AUDIO.mp3'  # also needed by step 7
         if remaster_deps:
             if not (_fullset.exists() and not self.force):
                 job = _ScriptJob(
@@ -2784,13 +2824,13 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # completing the band fully before the next band's REMASTER starts.
         # Matches the _enqueue_remaster() path which also uses MANUAL.
         #
-        # Also handles the MJPEG late-MOV case: when FULLSET already exists but
+        # Also handles the MJPEG late-MOV case: when AUDIO MP3 already exists but
         # quads are still pending (encode_ids non-empty), REEL depends on
         # encode_ids so it runs after REENCODE rather than being dropped silently.
         reel_id: str | None = None
         _fullset_ready = master_id is not None or _fullset.exists()
         _reel_exists = (
-            any(self.vids_dest.glob(f'{perf}*_reel.mp4')) and not self.force
+            any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4')) and not self.force
         )
         if _fullset_ready and not _reel_exists:
             reel_deps = [master_id] if master_id is not None else encode_ids

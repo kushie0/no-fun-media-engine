@@ -983,10 +983,10 @@ def generate_masters(
 
     import time as _time
     for mix_name, proc_name, ch_list, pan_map, ch_proc, master_proc in combos:
-        label = 'FULLSET' if selected_only else f'master_{mix_name}_{proc_name}'
+        label = 'AUDIO' if selected_only else f'master_{mix_name}_{proc_name}'
         if settings_slug:
             label = f'{label}_{settings_slug}'
-        # FULLSET outputs are MP3 (128 kbps CBR); non-FULLSET masters stay as WAV.
+        # AUDIO outputs are MP3 (128 kbps CBR); non-AUDIO masters stay as WAV.
         ext = '.mp3' if selected_only else '.wav'
         out_path = audio_dest / f'{base}_{label}{suffix}{ext}'
         try:

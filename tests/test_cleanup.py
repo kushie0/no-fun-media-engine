@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nofun.audio import AudioMixin
-from nofun.cleanup import AuditFinding, CleanupMixin, EXPIRE_AGE, FindingKind, archive_or_dedup, canonical_sharepoint_name, make_sharepoint_folder_name
+from nofun.cleanup import AuditFinding, CleanupMixin, EXPIRE_AGE, FindingKind, archive_or_dedup, canonical_sharepoint_name, make_sharepoint_folder_name, write_sharepoint_info
 from nofun.media_io import DeleteQueue
 from nofun.video import VideoMixin
 
@@ -102,7 +102,7 @@ class TestAuditOrphanedTemp:
 
     def test_ignores_normal_mp4(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (tmp_path / 'foo_UL.mp4').write_bytes(b'\x00')
+        (tmp_path / 'foo_CAM1.mp4').write_bytes(b'\x00')
         findings = fp._audit_pipeline_state()
         assert FindingKind.ORPHANED_TEMP not in [f.kind for f in findings]
 
@@ -111,7 +111,7 @@ class TestAuditRedundantSource:
     def test_mov_with_all_quads_is_redundant(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band.mov').write_bytes(b'\x00')
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'26-01-01_Band_{q}.mp4').write_bytes(b'\x00')
         findings = fp._audit_pipeline_state()
         assert FindingKind.REDUNDANT_SOURCE in [f.kind for f in findings]
@@ -119,7 +119,7 @@ class TestAuditRedundantSource:
     def test_mov_without_all_quads_not_redundant(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band.mov').write_bytes(b'\x00')
-        (fp.vids_dest / '26-01-01_Band_UL.mp4').write_bytes(b'\x00')  # only 1 of 4
+        (fp.vids_dest / '26-01-01_Band_CAM1.mp4').write_bytes(b'\x00')  # only 1 of 4
         findings = fp._audit_pipeline_state()
         assert FindingKind.REDUNDANT_SOURCE not in [f.kind for f in findings]
 
@@ -134,7 +134,7 @@ class TestAuditRedundantSource:
 class TestAuditMissingClips:
     def test_quads_without_clips_flagged(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             f = fp.vids_dest / f'26-01-01_Band_{q}.mp4'
             f.write_bytes(b'\x00')
             _age_file(f)
@@ -143,11 +143,11 @@ class TestAuditMissingClips:
 
     def test_quads_with_clips_not_flagged(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'26-01-01_Band_{q}.mp4').write_bytes(b'\x00')
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (clips_dir / f'26-01-01_Band_{q}_1.mp4').write_bytes(b'\x00')
         findings = fp._audit_pipeline_state()
         assert FindingKind.MISSING_CLIPS not in [f.kind for f in findings]
@@ -156,16 +156,16 @@ class TestAuditMissingClips:
     def test_partial_clips_flagged(self, tmp_path):
         """Quads where clip counts differ (cancelled mid-quad) are flagged."""
         fp = _FakePipeline(tmp_path)
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             f = fp.vids_dest / f'26-01-01_Band_{q}.mp4'
             f.write_bytes(b'\x00')
             _age_file(f)
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
         for i in range(1, 6):
-            (clips_dir / f'26-01-01_Band_UL_{i}.mp4').write_bytes(b'\x00')
+            (clips_dir / f'26-01-01_Band_CAM1_{i}.mp4').write_bytes(b'\x00')
         for i in range(1, 4):
-            (clips_dir / f'26-01-01_Band_UR_{i}.mp4').write_bytes(b'\x00')
+            (clips_dir / f'26-01-01_Band_CAM2_{i}.mp4').write_bytes(b'\x00')
         result = fp._check_missing_clips()
         assert len(result) == 1
         assert result[0].kind == FindingKind.MISSING_CLIPS
@@ -176,17 +176,17 @@ class TestAuditOrphanedClips:
         fp = _FakePipeline(tmp_path)
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
-        (clips_dir / '26-01-01_Band_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / '26-01-01_Band_CAM1_1.mp4').write_bytes(b'\x00')
         findings = fp._audit_pipeline_state()
         assert FindingKind.ORPHANED_CLIPS in [f.kind for f in findings]
 
     def test_clips_with_quads_not_orphaned(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'26-01-01_Band_{q}.mp4').write_bytes(b'\x00')
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
-        (clips_dir / '26-01-01_Band_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / '26-01-01_Band_CAM1_1.mp4').write_bytes(b'\x00')
         findings = fp._audit_pipeline_state()
         assert FindingKind.ORPHANED_CLIPS not in [f.kind for f in findings]
 
@@ -195,15 +195,15 @@ class TestAuditArchiveDedup:
     def test_archive_matching_live_is_flagged(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         content = b'\x00' * 256
-        (fp.vids_dest / 'foo_UL.mp4').write_bytes(content)
-        (fp.video_archive / 'foo_UL.mp4').write_bytes(content)
+        (fp.vids_dest / 'foo_CAM1.mp4').write_bytes(content)
+        (fp.video_archive / 'foo_CAM1.mp4').write_bytes(content)
         findings = fp._audit_pipeline_state()
         assert FindingKind.ARCHIVE_DEDUP in [f.kind for f in findings]
 
     def test_archive_different_size_not_flagged(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (fp.vids_dest / 'foo_UL.mp4').write_bytes(b'\x00' * 256)
-        (fp.video_archive / 'foo_UL.mp4').write_bytes(b'\x00' * 512)
+        (fp.vids_dest / 'foo_CAM1.mp4').write_bytes(b'\x00' * 256)
+        (fp.video_archive / 'foo_CAM1.mp4').write_bytes(b'\x00' * 512)
         findings = fp._audit_pipeline_state()
         assert FindingKind.ARCHIVE_DEDUP not in [f.kind for f in findings]
 
@@ -235,7 +235,7 @@ class TestAuditChecks:
     def test_check_redundant_mov_sources(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band.mov').write_bytes(b'\x00')
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'26-01-01_Band_{q}.mp4').write_bytes(b'\x00')
         result = fp._check_redundant_mov_sources()
         assert len(result) == 1
@@ -246,7 +246,7 @@ class TestAuditChecks:
     def test_check_redundant_mov_sources_partial_quads(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band.mov').write_bytes(b'\x00')
-        (fp.vids_dest / '26-01-01_Band_UL.mp4').write_bytes(b'\x00')  # only 1 of 4
+        (fp.vids_dest / '26-01-01_Band_CAM1.mp4').write_bytes(b'\x00')  # only 1 of 4
         assert fp._check_redundant_mov_sources() == []
 
     def test_check_redundant_wav_sources(self, tmp_path):
@@ -267,7 +267,7 @@ class TestAuditChecks:
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band_ch01.wav').write_bytes(b'\x00')
         (tmp_path / '26-01-01_Band_ch02.wav').write_bytes(b'\x00')
-        (fp.audio_dest / '26-01-01_Band.zip').write_bytes(b'\x00')
+        (fp.audio_dest / '26-01-01_Band_MULTITRACK.zip').write_bytes(b'\x00')
         result = fp._check_orphaned_channel_wavs()
         assert len(result) == 1
         assert result[0].kind == FindingKind.ORPHANED_CHANNELS
@@ -282,7 +282,7 @@ class TestAuditChecks:
         fp = _FakePipeline(tmp_path)
         (tmp_path / '26-01-01_Band_chan1.wav').write_bytes(b'\x00')
         (tmp_path / '26-01-01_Band_chan2.wav').write_bytes(b'\x00')
-        (fp.audio_dest / '26-01-01_Band.zip').write_bytes(b'\x00')
+        (fp.audio_dest / '26-01-01_Band_MULTITRACK.zip').write_bytes(b'\x00')
         result = fp._check_orphaned_hardware_wavs()
         assert len(result) == 1
         assert result[0].kind == FindingKind.ORPHANED_CHANNELS
@@ -294,7 +294,7 @@ class TestAuditChecks:
         audio_dir = tmp_path / 'Audio'
         audio_dir.mkdir(exist_ok=True)
         (audio_dir / '26-01-01_Band_chan1.wav').write_bytes(b'\x00')
-        (fp.audio_dest / '26-01-01_Band.zip').write_bytes(b'\x00')
+        (fp.audio_dest / '26-01-01_Band_MULTITRACK.zip').write_bytes(b'\x00')
         result = fp._check_orphaned_hardware_wavs()
         assert len(result) == 1
         assert len(result[0].files) == 1
@@ -320,7 +320,7 @@ class TestAuditChecks:
 
     def test_check_missing_clips(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        ul = fp.vids_dest / '26-01-01_Band_UL.mp4'
+        ul = fp.vids_dest / '26-01-01_Band_CAM1.mp4'
         ul.write_bytes(b'\x00')
         _age_file(ul)
         result = fp._check_missing_clips()
@@ -330,24 +330,24 @@ class TestAuditChecks:
 
     def test_check_missing_clips_present(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (fp.vids_dest / '26-01-01_Band_UL.mp4').write_bytes(b'\x00')
+        (fp.vids_dest / '26-01-01_Band_CAM1.mp4').write_bytes(b'\x00')
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
-        (clips_dir / '26-01-01_Band_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / '26-01-01_Band_CAM1_1.mp4').write_bytes(b'\x00')
         assert fp._check_missing_clips() == []
 
     def test_check_orphaned_clip_dirs(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         clips_dir = fp.clips_dest / '26-01-01_Ghost'
         clips_dir.mkdir()
-        (clips_dir / '26-01-01_Ghost_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / '26-01-01_Ghost_CAM1_1.mp4').write_bytes(b'\x00')
         result = fp._check_orphaned_clip_dirs()
         assert len(result) == 1
         assert result[0].kind == FindingKind.ORPHANED_CLIPS
 
     def test_check_orphaned_clip_dirs_has_quads(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'26-01-01_Band_{q}.mp4').write_bytes(b'\x00')
         clips_dir = fp.clips_dest / '26-01-01_Band'
         clips_dir.mkdir()
@@ -356,16 +356,16 @@ class TestAuditChecks:
     def test_check_archive_duplicates(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         content = b'\x00' * 256
-        (fp.vids_dest / 'foo_UL.mp4').write_bytes(content)
-        (fp.video_archive / 'foo_UL.mp4').write_bytes(content)
+        (fp.vids_dest / 'foo_CAM1.mp4').write_bytes(content)
+        (fp.video_archive / 'foo_CAM1.mp4').write_bytes(content)
         result = fp._check_archive_duplicates()
         assert len(result) == 1
         assert result[0].kind == FindingKind.ARCHIVE_DEDUP
 
     def test_check_archive_duplicates_different_size(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (fp.vids_dest / 'foo_UL.mp4').write_bytes(b'\x00' * 256)
-        (fp.video_archive / 'foo_UL.mp4').write_bytes(b'\x00' * 512)
+        (fp.vids_dest / 'foo_CAM1.mp4').write_bytes(b'\x00' * 256)
+        (fp.video_archive / 'foo_CAM1.mp4').write_bytes(b'\x00' * 512)
         assert fp._check_archive_duplicates() == []
 
     def test_check_expired_cloud_shares_no_sharepoint(self, tmp_path):
@@ -535,7 +535,7 @@ def _old_mov(fp, base='26-04-06_ALTAR'):
 
 def _create_quads(fp, base='26-04-06_ALTAR'):
     """Create all 4 dummy quadrant MP4s in vids_dest."""
-    for q in ('UL', 'UR', 'LL', 'LR'):
+    for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
         (fp.vids_dest / f'{base}_{q}.mp4').write_bytes(b'\x00')
 
 
@@ -547,7 +547,7 @@ class TestQuadsVerified:
     def test_returns_true_when_all_quads_probe_valid(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         base = '26-04-11_ALTAR'
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'{base}_{q}.mp4').write_bytes(b'\x00')
 
         with patch('nofun.cleanup.probe_video', return_value=('h264', 'High', 'yuv420p')):
@@ -556,7 +556,7 @@ class TestQuadsVerified:
     def test_returns_false_when_quad_missing(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         base = '26-04-11_ALTAR'
-        for q in ('UL', 'UR', 'LL'):  # only 3 of 4
+        for q in ('CAM1', 'CAM2', 'CAM3'):  # only 3 of 4
             (fp.vids_dest / f'{base}_{q}.mp4').write_bytes(b'\x00')
 
         with patch('nofun.cleanup.probe_video', return_value=('h264', 'High', 'yuv420p')):
@@ -565,7 +565,7 @@ class TestQuadsVerified:
     def test_returns_false_when_probe_returns_unknown(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         base = '26-04-11_ALTAR'
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'{base}_{q}.mp4').write_bytes(b'\x00')
 
         with patch('nofun.cleanup.probe_video', return_value=('unknown', 'unknown', 'unknown')):
@@ -579,7 +579,7 @@ class TestQuadsVerified:
 class TestZipVerified:
     def test_returns_true_for_valid_zip_with_entries(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        zip_path = fp.audio_dest / '26-04-11_ALTAR.zip'
+        zip_path = fp.audio_dest / '26-04-11_ALTAR_MULTITRACK.zip'
         with zipfile.ZipFile(zip_path, 'w') as zf:
             zf.writestr('channel_01.wav', b'WAV data')
 
@@ -591,17 +591,17 @@ class TestZipVerified:
 
     def test_returns_false_when_zip_is_zero_bytes(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (fp.audio_dest / '26-04-11_ALTAR.zip').write_bytes(b'')
+        (fp.audio_dest / '26-04-11_ALTAR_MULTITRACK.zip').write_bytes(b'')
         assert fp._zip_verified('26-04-11_ALTAR') is False
 
     def test_returns_false_when_zip_is_corrupt(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        (fp.audio_dest / '26-04-11_ALTAR.zip').write_bytes(b'not a zip file')
+        (fp.audio_dest / '26-04-11_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip file')
         assert fp._zip_verified('26-04-11_ALTAR') is False
 
     def test_returns_false_when_zip_has_no_entries(self, tmp_path):
         fp = _FakePipeline(tmp_path)
-        zip_path = fp.audio_dest / '26-04-11_ALTAR.zip'
+        zip_path = fp.audio_dest / '26-04-11_ALTAR_MULTITRACK.zip'
         with zipfile.ZipFile(zip_path, 'w'):
             pass  # empty ZIP
         assert fp._zip_verified('26-04-11_ALTAR') is False
@@ -643,14 +643,14 @@ class TestAutoExpireRawWithQualityGate:
 
     def test_wav_deleted_when_zip_verified(self, tmp_path):
         """Old .wav, valid ZIP exists → deleted.
-        ZIP is named with the normalized date '2026-04-06_ALTAR.zip' — the form
+        ZIP is named with the normalized date '2026-04-06_ALTAR_MULTITRACK.zip' — the form
         that extract_date_band returns and that _zip_wav_group uses.
         """
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
 
-        zip_path = fp.audio_dest / '2026-04-06_ALTAR.zip'
+        zip_path = fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip'
         with zipfile.ZipFile(zip_path, 'w') as zf:
             zf.writestr('channel_01.wav', b'audio data')
 
@@ -663,7 +663,7 @@ class TestAutoExpireRawWithQualityGate:
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
-        (fp.audio_dest / '2026-04-06_ALTAR.zip').write_bytes(b'not a zip')
+        (fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
 
         fp._auto_expire_raw_files()
 
@@ -686,7 +686,7 @@ class TestAutoExpireRawWithQualityGate:
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
-        (fp.audio_dest / '2026-04-06_ALTAR.zip').write_bytes(b'not a zip')
+        (fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
         findings = fp._check_expired_raw_wavs()
         assert findings == []
 
@@ -1006,7 +1006,7 @@ class TestSyncEligiblePerformances:
         return fp
 
     def _seed_quads(self, fp, base: str) -> None:
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (fp.vids_dest / f'{base}_{q}.mp4').write_bytes(b'\x00')
 
     def test_sync_skips_files_at_or_past_expire_age(self, tmp_path):
@@ -1019,7 +1019,7 @@ class TestSyncEligiblePerformances:
 
         fp._sync_eligible_performances()
 
-        assert not list(fp.sharepoint_dest.rglob(f'{base}_UL.mp4')), \
+        assert not list(fp.sharepoint_dest.rglob(f'{base}_CAM1.mp4')), \
             f"must not upload at age={EXPIRE_AGE} — would create dead-on-arrival lease"
 
     def test_sync_uploads_files_just_under_expire_age(self, tmp_path):
@@ -1033,9 +1033,9 @@ class TestSyncEligiblePerformances:
         fp._sync_eligible_performances()
 
         # Cloud filenames have the date prefix stripped (see cloud_filename())
-        assert list(fp.sharepoint_dest.rglob('BAND_UL.mp4')), \
+        assert list(fp.sharepoint_dest.rglob('BAND_CAM1.mp4')), \
             f"should upload — age={EXPIRE_AGE - 1} still has lease left"
-        assert not list(fp.sharepoint_dest.rglob(f'{base}_UL.mp4')), \
+        assert not list(fp.sharepoint_dest.rglob(f'{base}_CAM1.mp4')), \
             "cloud filename must not retain date prefix"
 
     def test_sync_renames_existing_dated_copy_instead_of_reupload(self, tmp_path):
@@ -1058,7 +1058,7 @@ class TestSyncEligiblePerformances:
         sp_folder = fp.sharepoint_dest / prefix
         sp_folder.mkdir(parents=True)
         sentinel_bytes = b'pre-existing cloud content'
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (sp_folder / f'{base}_{q}.mp4').write_bytes(sentinel_bytes)
 
         fp._sync_eligible_performances()
@@ -1070,7 +1070,7 @@ class TestSyncEligiblePerformances:
         )
 
         # After sync: stripped names exist, dated names gone, content unchanged
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             stripped = final_folder / f'BAND_{q}.mp4'
             dated    = final_folder / f'{base}_{q}.mp4'
             assert stripped.exists(),     f'stripped {q} missing — was the dated copy uploaded instead of renamed?'
@@ -1099,7 +1099,7 @@ class TestSyncEligiblePerformances:
         sp_folder = fp.sharepoint_dest / prefix
         sp_folder.mkdir(parents=True)
         sentinel_bytes = b'cold dehydrated cloud content'
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (sp_folder / f'{base}_{q}.mp4').write_bytes(sentinel_bytes)
 
         with patch('media_engine.is_cloud_only', return_value=True):
@@ -1112,7 +1112,7 @@ class TestSyncEligiblePerformances:
 
         # Stripped names must NOT exist (no rename happened, no materialization).
         # Dated copies must be untouched.
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             dated    = final_folder / f'{base}_{q}.mp4'
             stripped = final_folder / f'BAND_{q}.mp4'
             assert dated.exists(), \
@@ -1228,3 +1228,86 @@ class TestArchiveAudioBatch:
         info_lines = [r.message for r in caplog.records
                       if r.levelno == logging.INFO and 'ARCHIVE AUDIO' in r.message]
         assert len(info_lines) == 0
+
+
+class TestWriteSharepointInfo:
+    """In-progress / convergence behaviour of write_sharepoint_info."""
+
+    EXP = datetime.date(2026, 6, 21)
+
+    def _read(self, folder: pathlib.Path) -> str:
+        return (folder / '_nofun_info.txt').read_text(encoding='utf-8')
+
+    def test_baseline_unchanged_without_expected(self, tmp_path):
+        ul = tmp_path / 'BAND_UL.mp4'
+        ul.write_bytes(b'x' * 10)
+        write_sharepoint_info(tmp_path, [ul], expire_date=self.EXP)
+        text = self._read(tmp_path)
+        assert 'processing' not in text
+        assert 'BAND_UL.mp4' in text
+        assert 'uploaded' in text
+
+    def test_absent_expected_marked_processing(self, tmp_path):
+        write_sharepoint_info(
+            tmp_path, [], expire_date=self.EXP, new_files=[],
+            expected_names=['BAND_UL.mp4', 'BAND_UR.mp4', 'BAND.zip'],
+        )
+        text = self._read(tmp_path)
+        assert 'still processing — files appear here as they finish.' in text
+        assert text.count('processing…') == 3
+        # markers must not be timestamp sub-lines, so no history was created
+        assert 'uploaded' not in text
+
+    def test_present_and_expected_mix(self, tmp_path):
+        ul = tmp_path / 'BAND_UL.mp4'
+        ul.write_bytes(b'x' * 10)
+        write_sharepoint_info(
+            tmp_path, [ul], expire_date=self.EXP, new_files=[ul],
+            expected_names=['BAND_UL.mp4', 'BAND_UR.mp4', 'BAND.zip'],
+        )
+        text = self._read(tmp_path)
+        assert 'still processing' in text
+        ul_line = next(l for l in text.splitlines() if 'BAND_UL.mp4' in l)
+        assert 'processing…' not in ul_line
+        assert text.count('processing…') == 2  # UR + zip still pending
+
+    def test_converges_to_baseline_no_pollution(self, tmp_path):
+        expected = ['BAND_UL.mp4', 'BAND_UR.mp4', 'BAND.zip']
+        # Same folder name in both arms — the info file embeds folder.name,
+        # so identical names let us compare the rest byte-for-byte.
+        prog = tmp_path / 'p1' / '26-06-21_BAND'
+        prog.mkdir(parents=True)
+        with patch('nofun.cleanup._fmt_ts', return_value='Jun 21, 2026  9:05pm'):
+            # 1. in-progress write (nothing on disk yet)
+            write_sharepoint_info(
+                prog, [], expire_date=self.EXP, new_files=[],
+                expected_names=expected,
+            )
+            # 2. files land; final write through the same expected_names
+            landed = []
+            for n in expected:
+                p = prog / n
+                p.write_bytes(b'x' * 10)
+                landed.append(p)
+            write_sharepoint_info(
+                prog, landed, expire_date=self.EXP, new_files=landed,
+                expected_names=expected,
+            )
+            after = self._read(prog)
+
+            # 3. a folder that never saw an in-progress write
+            clean = tmp_path / 'p2' / '26-06-21_BAND'
+            clean.mkdir(parents=True)
+            clean_files = []
+            for n in expected:
+                p = clean / n
+                p.write_bytes(b'x' * 10)
+                clean_files.append(p)
+            write_sharepoint_info(
+                clean, clean_files, expire_date=self.EXP, new_files=clean_files,
+                expected_names=expected,
+            )
+            baseline = self._read(clean)
+
+        assert 'processing' not in after
+        assert after == baseline

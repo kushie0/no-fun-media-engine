@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = [
     'build_encoder_config',
     'VideoMixin',
+    'CAM_LABELS',
     'STEP_SECONDS',
     'QUAD_FILTER',
     'CLIP_FILTER',
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Ordered: index → cloud label. UL→CAM1, UR→CAM2, LL→CAM3, LR→CAM4.
+CAM_LABELS = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
 
 STEP_SECONDS = 40
 
@@ -179,7 +183,7 @@ class VideoMixin:
 
     def _encode_quadrants(self, source: pathlib.Path) -> bool:
         base  = source.stem
-        quads = ('UL', 'UR', 'LL', 'LR')
+        quads = CAM_LABELS
         temps = {q: self.vids_dest / f'{base}_{q}_temp.mp4' for q in quads}
         dests = {q: self.vids_dest / f'{base}_{q}.mp4'      for q in quads}
 
@@ -381,7 +385,7 @@ class VideoMixin:
         per_quad_start: dict[str, int] = {}  # empty = all quads from clip 1
 
         if not self.force:
-            quads_present = [q for q in ('UL', 'UR', 'LL', 'LR')
+            quads_present = [q for q in CAM_LABELS
                              if (self.vids_dest / f'{base}_{q}.mp4').exists()]
             if not quads_present:
                 return
@@ -407,7 +411,7 @@ class VideoMixin:
 
         any_quad = next(
             (self.vids_dest / f'{base}_{q}.mp4'
-             for q in ('UL', 'UR', 'LL', 'LR')
+             for q in CAM_LABELS
              if (self.vids_dest / f'{base}_{q}.mp4').exists()),
             None,
         )
@@ -481,7 +485,7 @@ class VideoMixin:
                     f"Clip export failed quads: {', '.join(failed_quads)}  ({base}){tail}"
                 )
         elif not result.ok:
-            for quad in ('UL', 'UR', 'LL', 'LR'):
+            for quad in CAM_LABELS:
                 partial = list(self.search_dir.glob(f'{base}_{quad}_temp_*.mp4'))
                 if self._pause_state == PauseState.HARD_PENDING and partial:
                     self._move_to_hard_paused(partial)
@@ -497,7 +501,7 @@ class VideoMixin:
 
     def _process_mov(self, source: pathlib.Path, skip_clips: bool = False) -> bool:
         base = source.stem
-        quads = [self.vids_dest / f'{base}_{q}.mp4' for q in ('UL', 'UR', 'LL', 'LR')]
+        quads = [self.vids_dest / f'{base}_{q}.mp4' for q in CAM_LABELS]
         all_exist = all(q.exists() for q in quads)
 
         if all_exist and not self.force:
