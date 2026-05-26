@@ -2752,9 +2752,18 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
         # --- 3. Export clips (GPU_BOUND, priority=30, depends on encode) ---
         if encode_ids:
+            # Check all known clip locations so we don't re-encode what already
+            # exists on a secondary drive (e.g. C:\clips when clips_dest is D:\clips).
+            _clip_roots = [self.clips_dest]
+            _c_clips = self.mount_c / 'clips'
+            if _c_clips.is_dir() and _c_clips != self.clips_dest:
+                _clip_roots.append(_c_clips)
             _clips_done = all(
-                (self.clips_dest / mov.stem).is_dir()
-                and any((self.clips_dest / mov.stem).glob('*.mp4'))
+                any(
+                    (root / mov.stem).is_dir()
+                    and any((root / mov.stem).glob('*.mp4'))
+                    for root in _clip_roots
+                )
                 for mov in mov_list
                 if all((self.vids_dest / f'{mov.stem}_{q}.mp4').exists()
                        for q in CAM_LABELS)
