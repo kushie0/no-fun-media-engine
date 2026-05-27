@@ -565,9 +565,7 @@ class CleanupMixin:
             if not zip_exists and db is not None:
                 parts = group_key.split('_', 1)
                 if len(parts) == 2:
-                    date_full = ('20' + parts[0]) if (
-                        len(parts[0]) == 8 and parts[0][2] == '-') else parts[0]
-                    perf_db = db.get_performance(date_full, parts[1])
+                    perf_db = db.get_performance(parts[0], parts[1])
                     all_silent = bool(perf_db and perf_db.get('audio_all_silent'))
             if not (zip_exists or all_silent):
                 continue
@@ -708,7 +706,7 @@ class CleanupMixin:
                 continue
             try:
                 parts = date_str.split('-')
-                rec_date = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+                rec_date = datetime.date(2000 + int(parts[0]), int(parts[1]), int(parts[2]))
             except (ValueError, IndexError):
                 continue
             age = (today - rec_date).days
@@ -740,9 +738,7 @@ class CleanupMixin:
             return findings
         today = datetime.date.today()
 
-        # Build set of ZIP perf keys in audio_dest.
-        # Strip _MULTITRACK suffix so '2026-04-06_ALTAR_MULTITRACK' keyed as
-        # '2026-04-06_ALTAR' — the form that extract_date_band(wav.stem) returns.
+        # Build set of ZIP perf keys (YY-MM-DD_BAND) matching extract_date_band output.
         zip_stems: set[str] = set()
         if self.audio_dest.is_dir():
             for zf in self.audio_dest.glob('*.zip'):
@@ -756,7 +752,7 @@ class CleanupMixin:
                 continue
             try:
                 parts = date_str.split('-')
-                rec_date = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+                rec_date = datetime.date(2000 + int(parts[0]), int(parts[1]), int(parts[2]))
             except (ValueError, IndexError):
                 continue
             if (today - rec_date).days <= RAW_EXPIRE_AGE:

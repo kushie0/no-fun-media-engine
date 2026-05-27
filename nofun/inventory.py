@@ -127,14 +127,15 @@ def _clean_band(raw: str) -> str:
 
 
 def extract_date_band(filename: str) -> tuple[str, str]:
-    """Return (YYYY-MM-DD, band_name) parsed from filename, or ('TBD','TBD')."""
+    """Return (YY-MM-DD, band_name) parsed from filename, or ('TBD','TBD')."""
     if m := RECORDER_PAT.match(filename):
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "Audio Recorder"
     if m := SHORT_DATE.match(filename):
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return f"20{y:02d}-{mo:02d}-{d:02d}", _clean_band(m.group(4))
+        return f"{y:02d}-{mo:02d}-{d:02d}", _clean_band(m.group(4))
     if m := LONG_DATE.match(filename):
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}", _clean_band(m.group(4))
+        # Long dates (YYYY-MM-DD) truncated to YY-MM-DD for consistency
+        return f"{m.group(1)[2:]}-{m.group(2)}-{m.group(3)}", _clean_band(m.group(4))
     return 'TBD', 'TBD'
 
 
@@ -150,7 +151,7 @@ def extract_date_band_from_path(path: pathlib.Path) -> tuple[str, str]:
         return date, band
     if m := SHORT_DATE.match(path.parent.name):
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return f"20{y:02d}-{mo:02d}-{d:02d}", _clean_band(path.stem)
+        return f"{y:02d}-{mo:02d}-{d:02d}", _clean_band(path.stem)
     return 'TBD', 'TBD'
 
 

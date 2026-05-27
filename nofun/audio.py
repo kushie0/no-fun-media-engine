@@ -131,7 +131,7 @@ class AudioMixin:
             parts = group_key.split('_', 1)
             if len(parts) < 2:
                 return
-            date_str = '20' + parts[0]
+            date_str = parts[0]
             band = parts[1]
         try:
             db.upsert(date_str, band, 'audio_all_silent', {
@@ -355,11 +355,6 @@ class AudioMixin:
                 base  = f.stem
                 m = re.match(r'^\d{2}-\d{1,2}-\d{1,2}_(.+)$', base)
                 band  = m.group(1) if m else base
-            else:
-                # extract_date_band returns YYYY-MM-DD; normalise to YY-MM-DD
-                if len(date) == 10 and date[:2] == '20':
-                    date = date[2:]
-
             # Strip per-channel and numbered suffixes that inventory_generator may leave
             band = re.sub(r'_chan[\d.]*$', '', band)
             band = re.sub(r'_ch\d+$', '', band)
