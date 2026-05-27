@@ -624,8 +624,7 @@ class CleanupMixin:
             return findings
         for clips_dir in sorted(d for d in self.clips_dest.iterdir() if d.is_dir()):
             base = clips_dir.name
-            if not any((self.vids_dest / f'{base}_{q}.mp4').exists()
-                       for q in CAM_LABELS):
+            if not any(self.vids_dest.glob(f'{base}_*.mp4')):
                 clip_files = list(clips_dir.rglob('*.mp4'))
                 total = sum(_safe_size(f) for f in clip_files)
                 findings.append(AuditFinding(
@@ -994,6 +993,8 @@ class CleanupMixin:
             elif finding.action == 'move' and finding.destination:
                 for f in finding.files:
                     self._archive_or_dedup(f, finding.destination)
+            elif finding.kind == FindingKind.ORPHANED_CLIPS:
+                self.logger.warning(f"ORPHAN  {finding.label}  ({fmt_size(finding.size_bytes)})")
             elif finding.action == 'delete':
                 for f in finding.files:
                     self.delete_queue.add(f, finding.reason, self.logger)
