@@ -1,7 +1,6 @@
 @echo off
-:: Clips live on C: (SSD) to avoid D: HDD contention with VLC streaming.
-:: Unset or change CLIPS_ROOT to relocate clip outputs.
-set "CLIPS_ROOT=C:\clips"
+:: D: is the primary clip destination. C:\clips is kept in sync by robocopy for stream scripts.
+set "CLIPS_ROOT=D:\clips"
 set TMUX_EXE=
 where tmux >nul 2>&1
 if %ERRORLEVEL% == 0 set TMUX_EXE=tmux
