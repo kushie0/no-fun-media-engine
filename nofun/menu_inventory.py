@@ -82,6 +82,7 @@ class InventoryMenuMixin:
             return
         self._collect_header_stats()   # refresh disk strings before opening the menu
         self._status_expanded_key = None
+        self._remaster_state      = None
         self._show_status_list(_open=True)
         self._active_menu = MenuMode.STATUS
 
@@ -598,11 +599,91 @@ class InventoryMenuMixin:
                 self.logger.info("NOTICE  Type CONFIRM to proceed, or HOME to cancel")
             return
 
+    def _remaster_band(self, date: str, band: str) -> None:
+        """Enqueue (or restart) a REMASTER for a single band of *date*."""
+        short    = date[2:] if date.startswith('20') else date
+        perf_key = f"{short}_{band}_REMASTER"
+        active   = [qj for qj in self._job_queue.all_active()
+                    if qj.manifest_key == perf_key]
+        if active:
+            # Second press — cancel what's queued/running and restart from scratch
+            running = [qj for qj in active if qj.status == 'running']
+            if running:
+                self._kill_all_ffmpeg_procs()
+            self._job_queue.cancel_manifest(perf_key)
+            self._enqueue_remaster(date, force=True, band=band)
+        else:
+            self._enqueue_remaster(date, band=band)
+
+    def _cancel_remaster(self) -> None:
+        self._remaster_state = None
+        self._show_status_list()
+
+    def _show_remaster_select(self) -> None:
+        """List bands for the expanded show so the user can pick one (or all)."""
+        from nofun.tui import MenuRow
+        date = self._status_expanded_key
+        if not date:
+            self._cancel_remaster()
+            return
+        bands = [
+            ps.band for (d, _), ps in self._status_entries
+            if d == date and ps.band not in ('NOFUN', 'TBD', '')
+        ]
+        rows: list[MenuRow] = [
+            MenuRow(index=None, text=f"  Show {date}  ·  select the band to remaster", dim=True),
+            MenuRow(index=None, text='', dim=True),
+        ]
+        for j, band in enumerate(bands, start=1):
+            rows.append(MenuRow(index=None, text=f"  b{j}  {band}"))
+        rows.append(MenuRow(index=None, text='   A  ALL bands'))
+        rows.append(MenuRow(index=None, text='', dim=True))
+        bn = len(bands)
+        bar = f"Available commands:  b1–b{bn} / A (all) / [yellow]HOME[/yellow] to cancel"
+        if self._app:
+            self._app.update_menu('INVENTORY — REMASTER', 'Select a band', rows, '', stats='')
+            self._app.update_command_bar(bar)
+
+    def _handle_remaster_command(self, cmd: str) -> None:
+        """Route commands while _remaster_state is active."""
+        if cmd == 'HOME':
+            self._cancel_remaster()
+            return
+        date = self._status_expanded_key
+        if not date:
+            self._cancel_remaster()
+            return
+        bands = [
+            ps.band for (d, _), ps in self._status_entries
+            if d == date and ps.band not in ('NOFUN', 'TBD', '')
+        ]
+        if cmd.upper() in ('A', 'ALL'):
+            for band in bands:
+                self._remaster_band(date, band)
+            self._remaster_state = None
+            self._show_status_list()
+            return
+        if cmd.lower().startswith('b'):
+            try:
+                idx = int(cmd[1:]) - 1
+                if 0 <= idx < len(bands):
+                    self._remaster_band(date, bands[idx])
+                    self._remaster_state = None
+                    self._show_status_list()
+                    return
+            except (ValueError, IndexError):
+                pass
+        self.logger.info(f"NOTICE  type b1–b{len(bands)} / A (all) to select, or HOME to cancel")
+
     def _handle_status_command(self, cmd: str) -> None:
         """Route commands while the INVENTORY menu is active."""
         # Delegate to rename sub-flow when active
         if self._rename_state is not None:
             self._handle_rename_command(cmd)
+            return
+        # Delegate to remaster band-picker when active
+        if self._remaster_state is not None:
+            self._handle_remaster_command(cmd)
             return
 
         if cmd == 'HOME':
@@ -612,6 +693,7 @@ class InventoryMenuMixin:
                 return
             self._active_menu         = MenuMode.NONE
             self._status_expanded_key = None
+            self._remaster_state      = None
 
             self.logger.info("Inventory menu closed.")
             if self._app:
@@ -650,20 +732,19 @@ class InventoryMenuMixin:
             if self._status_expanded_key is None:
                 self.logger.info("NOTICE  Expand a show first (type its number), then REMASTER")
                 return
-            date    = self._status_expanded_key
-            short   = date[2:] if date.startswith('20') else date
-            perf_key = f"{short}_REMASTER"
-            active  = [qj for qj in self._job_queue.all_active()
-                       if qj.manifest_key == perf_key]
-            if active:
-                # Second press — cancel what's queued/running and restart from scratch
-                running = [qj for qj in active if qj.status == 'running']
-                if running:
-                    self._kill_all_ffmpeg_procs()
-                self._job_queue.cancel_manifest(perf_key)
-                self._enqueue_remaster(date, force=True)
-            else:
-                self._enqueue_remaster(date)
+            date  = self._status_expanded_key
+            bands = [
+                ps.band for (d, _), ps in self._status_entries
+                if d == date and ps.band not in ('NOFUN', 'TBD', '')
+            ]
+            if not bands:
+                self.logger.info("NOTICE  No remasterable bands found for this show")
+                return
+            if len(bands) == 1:
+                self._remaster_band(date, bands[0])
+                return
+            self._remaster_state = 'select'
+            self._show_remaster_select()
             return
 
         if cmd == 'TESTREMASTER':

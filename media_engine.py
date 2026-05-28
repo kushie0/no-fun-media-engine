@@ -256,6 +256,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._rename_date:     str | None            = None
         self._rename_band:     str | None            = None
         self._rename_new_name: str | None            = None
+        # REMASTER band-picker sub-state (active while _active_menu == MenuMode.STATUS)
+        self._remaster_state:  str | None            = None   # 'select' | None
         # Pause state
         # _current_ffmpeg_procs: running ffmpeg handles keyed by slot ('encode', 'audio')
         # _cmd_queue:            reference to the TUI command queue (set by run_with_queue)
@@ -1065,12 +1067,14 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             except Exception:
                 pass
 
-    def _enqueue_remaster(self, date_str: str, trial_seconds: int = 0, force: bool = False) -> None:
+    def _enqueue_remaster(self, date_str: str, trial_seconds: int = 0, force: bool = False,
+                          band: str | None = None) -> None:
         """Enqueue one REMASTER + REEL job pair per band for *date_str*.
 
         Each band gets a REMASTER (MANUAL) job followed by a REEL (GPU_BOUND)
         job that depends on it, so both appear individually in the JOBS menu.
-        Manifest key: YY-MM-DD_REMASTER.
+        When *band* is given, only that band is enqueued and the manifest key is
+        YY-MM-DD_<band>_REMASTER; otherwise all bands run under YY-MM-DD_REMASTER.
         """
         from nofun.job_manifest import JobManifest, PipelineJob
         short = date_str[2:] if date_str.startswith('20') else date_str
@@ -1078,6 +1082,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             ps for (d, _), ps in self._status_entries
             if d == date_str and ps.band not in ('NOFUN', 'TBD', '')
         ]
+        if band is not None:
+            bands = [ps for ps in bands if ps.band == band]
         if not bands:
             self.logger.info(f"REMASTER  no bands found for {date_str}")
             return
@@ -1110,7 +1116,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             python_fns[reel_job.job_id] = lambda p=perf: self._do_reel_for_perf(p, overwrite=True)
             cat_map[reel_job.job_id] = JobCategory.MANUAL  # user-initiated, no time gate
 
-        perf_key = f"{short}_REMASTER"
+        perf_key = f"{short}_{band}_REMASTER" if band else f"{short}_REMASTER"
         manifest = JobManifest(performance_key=perf_key, jobs=jobs, python_fns=python_fns)
         self._job_queue.enqueue(manifest, JobCategory.MANUAL, category_map=cat_map)
         if trial_seconds:
