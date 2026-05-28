@@ -61,7 +61,7 @@ def channel_stats(levels_db: dict[int, tuple[float, float]],
     return out
 
 
-def derive_flags(channels: dict[str, dict], room_board: dict, peaks: list) -> list[str]:
+def derive_flags(channels: dict[str, dict], room_board: dict, peak_freqs: list[float]) -> list[str]:
     flags: list[str] = []
     for ch, s in channels.items():
         if s.get('dead'):
@@ -70,13 +70,14 @@ def derive_flags(channels: dict[str, dict], room_board: dict, peaks: list) -> li
             flags.append(f'clip:{ch}')
     if abs(room_board.get('rms_delta_db', 0.0)) >= IMBALANCE_DB:
         flags.append(f"room_board_imbalance:{room_board['rms_delta_db']:+.0f}dB")
-    if peaks:
-        flags.append(f'feedback:{peaks[0][0]:.0f}Hz')
+    if peak_freqs:
+        flags.append(f'feedback:{peak_freqs[0]:.0f}Hz')
     return flags
 
 
 def build_metadata(performance: str, recipe: dict, channels: dict,
-                   room_board: dict, peaks: list, flags: list[str]) -> dict:
+                   room_board: dict, feedback: dict, flags: list[str]) -> dict:
+    """feedback: a prebuilt dict, e.g. {'source': 'dyers', 'peaks': [{'freq':.., 'engaged_pct':..}]}."""
     return {
         'schema_version': SCHEMA_VERSION,
         'performance': performance,
@@ -85,8 +86,7 @@ def build_metadata(performance: str, recipe: dict, channels: dict,
         'recipe': recipe,
         'channels': channels,
         'room_board': room_board,
-        'feedback': {'peaks': [{'freq': round(f, 1), 'prominence_db': round(p, 1)}
-                               for f, p in peaks]},
+        'feedback': feedback,
         'flags': flags,
     }
 

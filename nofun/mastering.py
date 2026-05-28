@@ -337,7 +337,7 @@ def dyers_suppress_mono(
     sensitivity: float = DYERS_SENSITIVITY, sharpness: float = DYERS_SHARPNESS,
     speed: float = DYERS_SPEED, resonance_gain_db: float = DYERS_RESONANCE_DB,
     band: tuple[float, float] = DYERS_BAND, max_peaks: int = DYERS_MAX_PEAKS,
-    env_bins: int = DYERS_ENV_BINS,
+    env_bins: int = DYERS_ENV_BINS, report: dict | None = None,
 ) -> np.ndarray:
     """DyERS-style WOLA dynamic resonance suppressor (numpy port). Per STFT frame, detect
     narrow peaks by LOCAL prominence (mag minus a moving-average envelope) — not a global
@@ -364,6 +364,14 @@ def dyers_suppress_mono(
     norm = np.zeros(len(xp))
     smoothed = np.ones(nbins)
 
+    # Optional activity report: count how many frames each bin was a suppressed peak, so the
+    # caller can record which frequencies DyERS actually reduced (not a static snapshot).
+    if report is not None:
+        report.setdefault('counts', np.zeros(nbins))
+        report.setdefault('n_frames', 0)
+        report['freqs'] = freqs
+        report['n_frames'] += n_frames
+
     # Block-vectorized WOLA: batch the FFTs/envelope/peak-detection per block; only the
     # attack/release recursion (+ tiny local-window Gaussians) runs per frame. Memory-bounded
     # so it doesn't thrash on long files. Output matches the per-frame reference to ~1e-6.
@@ -389,6 +397,8 @@ def dyers_suppress_mono(
             pk = np.nonzero(is_peak[j])[0]
             if pk.size > max_peaks:
                 pk = pk[np.argsort(prom[j, pk])[-max_peaks:]]
+            if report is not None and pk.size:
+                report['counts'][pk] += 1
             g = np.ones(nbins)
             for p in pk:
                 lo, hi = max(0, p - gwin), min(nbins, p + gwin + 1)
@@ -408,9 +418,38 @@ def dyers_suppress_mono(
 
 
 def dyers_suppress_stereo(left: np.ndarray, right: np.ndarray, sr: int,
-                          **kw) -> tuple[np.ndarray, np.ndarray]:
-    """Apply DyERS suppression to a stereo pair (per channel)."""
-    return dyers_suppress_mono(left, sr, **kw), dyers_suppress_mono(right, sr, **kw)
+                          report: dict | None = None, **kw) -> tuple[np.ndarray, np.ndarray]:
+    """Apply DyERS suppression to a stereo pair (per channel). A shared report dict
+    accumulates suppressed-peak activity across both channels."""
+    lo = dyers_suppress_mono(left, sr, report=report, **kw)
+    ro = dyers_suppress_mono(right, sr, report=report, **kw)
+    return lo, ro
+
+
+def dyers_report_peaks(report: dict, min_engaged: float = 0.02, max_peaks: int = 8,
+                       min_sep_bins: int = 4) -> list[tuple[float, float]]:
+    """Reduce a DyERS activity report to [(freq_hz, engaged_pct), ...] — the frequencies it
+    actually suppressed, by how persistently. Picks count local-maxima active in >= min_engaged
+    of frames, de-duped by min_sep_bins, sorted by engagement desc."""
+    counts = report.get('counts')
+    nf = report.get('n_frames', 0)
+    if counts is None or nf <= 0:
+        return []
+    freqs = report['freqs']
+    eng = counts / nf
+    cand = [b for b in range(1, len(counts) - 1)
+            if counts[b] > 0 and counts[b] >= counts[b - 1] and counts[b] >= counts[b + 1]
+            and eng[b] >= min_engaged]
+    cand.sort(key=lambda b: -counts[b])
+    chosen: list[int] = []
+    for b in cand:
+        if all(abs(b - c) >= min_sep_bins for c in chosen):
+            chosen.append(b)
+        if len(chosen) >= max_peaks:
+            break
+    peaks = [(float(freqs[b]), round(100.0 * eng[b], 1)) for b in chosen]
+    peaks.sort(key=lambda t: -t[1])
+    return peaks
 
 
 def make_approx_processor(sr: int) -> Callable[[np.ndarray], np.ndarray]:
@@ -1266,10 +1305,12 @@ def generate_masters(
                                    stats=mstats)
             if result is None:
                 continue
-            # Metadata feedback snapshot — what the room was doing, from the clean pre-master mix.
+            # Fallback feedback snapshot (only when DyERS is off) — a static long-term spectral
+            # read of the pre-master mix. When DyERS runs, we instead report what it actually
+            # suppressed per-frame (below), which catches intermittent resonances this misses.
             meta_peaks = (detect_resonant_peaks((result[0] + result[1]) * 0.5, sr,
                                                 band=DYERS_BAND, prominence_db=6.0, max_peaks=6)
-                          if write_meta else [])
+                          if (write_meta and not dyers) else [])
             if kill_feedback:
                 mono_sum = (result[0] + result[1]) * 0.5
                 peaks = detect_resonant_peaks(
@@ -1286,11 +1327,13 @@ def generate_masters(
                         f'FEEDBACK none found in {FEEDBACK_BAND[0]:.0f}-{FEEDBACK_BAND[1]:.0f}Hz')
             log.info('MASTER  applying bus processor', extra={'tui': False})
             left, right = master_proc(result[0], result[1])
+            dyers_report: dict = {}
             if dyers:
                 log.info(
                     f'DYERS   dynamic suppress {DYERS_BAND[0]:.0f}-{DYERS_BAND[1]:.0f}Hz',
                     extra={'tui': False})
-                left, right = dyers_suppress_stereo(left, right, sr)
+                left, right = dyers_suppress_stereo(
+                    left, right, sr, report=(dyers_report if write_meta else None))
             log.info(f'WRITE   {out_path.name}', extra={'tui': False})
             if slow_hq > 1:
                 import pyrubberband as rb
@@ -1332,8 +1375,18 @@ def generate_masters(
                                    'sharpness': DYERS_SHARPNESS, 'resonance_db': DYERS_RESONANCE_DB,
                                    'max_peaks': DYERS_MAX_PEAKS} if dyers else None),
                     }
-                    flags = _meta.derive_flags(chans, room_board, meta_peaks)
-                    meta = _meta.build_metadata(base, recipe, chans, room_board, meta_peaks, flags)
+                    if dyers and dyers_report.get('n_frames'):
+                        dpk = dyers_report_peaks(dyers_report)  # [(freq, engaged_pct)]
+                        feedback = {'source': 'dyers',
+                                    'peaks': [{'freq': round(f, 1), 'engaged_pct': p} for f, p in dpk]}
+                        peak_freqs = [f for f, _ in dpk]
+                    else:
+                        feedback = {'source': 'snapshot',
+                                    'peaks': [{'freq': round(f, 1), 'prominence_db': round(p, 1)}
+                                              for f, p in meta_peaks]}
+                        peak_freqs = [f for f, _ in meta_peaks]
+                    flags = _meta.derive_flags(chans, room_board, peak_freqs)
+                    meta = _meta.build_metadata(base, recipe, chans, room_board, feedback, flags)
                     meta_dir = audio_dest / 'mastering_meta'
                     _meta.write_sidecar(meta, meta_dir, base)
                     _meta.append_log(meta, meta_dir)

@@ -23,7 +23,7 @@ def test_channel_stats_crest_dead_clip():
 def test_derive_flags():
     chans = {'29': {'dead': False, 'clip': False}, '30': {'dead': True, 'clip': False},
              '31': {'dead': False, 'clip': True}}
-    flags = m.derive_flags(chans, {'rms_delta_db': 13.0}, [(2716.0, 9.1)])
+    flags = m.derive_flags(chans, {'rms_delta_db': 13.0}, [2716.0])
     assert 'dead_channel:30' in flags
     assert 'clip:31' in flags
     assert any(f.startswith('room_board_imbalance') for f in flags)
@@ -35,19 +35,24 @@ def test_derive_flags_clean():
     assert m.derive_flags(chans, {'rms_delta_db': 2.0}, []) == []
 
 
+def _fb(peaks):  # build a feedback dict like generate_masters does
+    return {'source': 'dyers', 'peaks': [{'freq': f, 'engaged_pct': p} for f, p in peaks]}
+
+
 def test_build_metadata_keys():
     meta = m.build_metadata('26-05-25_Bejavlvin', {'ch_depth': 70}, {'29': {}},
-                            {'rms_delta_db': 5.0}, [(2716.0, 9.1)], ['feedback:2716Hz'])
+                            {'rms_delta_db': 5.0}, _fb([(2716.0, 18.3)]), ['feedback:2716Hz'])
     for k in ('schema_version', 'performance', 'rendered_at', 'pipeline_sha',
               'recipe', 'channels', 'room_board', 'feedback', 'flags'):
         assert k in meta
     assert meta['schema_version'] == m.SCHEMA_VERSION
+    assert meta['feedback']['source'] == 'dyers'
     assert meta['feedback']['peaks'][0]['freq'] == 2716.0
 
 
 def test_append_log_one_line_per_call(tmp_path):
     meta = m.build_metadata('show', {}, {'30': {'dead': True}}, {'rms_delta_db': 1.0},
-                            [(2716.0, 9.1)], ['dead_channel:30'])
+                            _fb([(2716.0, 18.3)]), ['dead_channel:30'])
     m.append_log(meta, tmp_path)
     m.append_log(meta, tmp_path)
     lines = (tmp_path / 'mastering_log.jsonl').read_text().strip().splitlines()
@@ -59,7 +64,22 @@ def test_append_log_one_line_per_call(tmp_path):
 
 
 def test_write_sidecar(tmp_path):
-    meta = m.build_metadata('show', {'ch_depth': 70}, {}, {}, [], [])
+    meta = m.build_metadata('show', {'ch_depth': 70}, {}, {}, _fb([]), [])
     m.write_sidecar(meta, tmp_path, 'show')
     loaded = json.loads((tmp_path / 'show.json').read_text())
     assert loaded['recipe']['ch_depth'] == 70
+
+
+def test_dyers_report_peaks():
+    import numpy as np
+    from nofun.mastering import dyers_report_peaks
+    nb = 2049
+    counts = np.zeros(nb)
+    # a persistent resonance bin + a sporadic one below the engagement floor
+    counts[300] = 800   # ~80% of frames
+    counts[900] = 5     # ~0.5% — should be dropped
+    freqs = np.linspace(0, 24000, nb)
+    rep = {'counts': counts, 'n_frames': 1000, 'freqs': freqs}
+    peaks = dyers_report_peaks(rep, min_engaged=0.02)
+    assert peaks and abs(peaks[0][0] - freqs[300]) < 1
+    assert all(f != freqs[900] for f, _ in peaks)
