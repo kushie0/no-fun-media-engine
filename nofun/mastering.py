@@ -824,11 +824,21 @@ def _mix_channels(
         stats['align_ms'] = {ch: leads.get(ch, 0) / sr * 1000.0 for ch in available}
 
     # Pre-OTT denoise on room channels — strip noise floor before upward compression amplifies it.
+    # Skip silent/dead channels (e.g. an unplugged room mic): denoising silence is wasted work.
+    # BOOKMARK: when both room mics are live, the per-channel afftdn passes could run concurrently
+    # (one ffmpeg subprocess each) to ~halve denoise wall time — deferred until a 2nd mic returns.
     if denoise_room:
-        room_present = [c for c in ROOM_CHANNELS if c in raws]
-        if room_present:
-            logger.info(f'DENOISE room ch{room_present} (afftdn)', extra={'tui': False})
-            for c in room_present:
+        to_denoise = []
+        for c in (c for c in ROOM_CHANNELS if c in raws):
+            a = raws[c].astype(np.float64)
+            rms_db = 20.0 * math.log10((float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0) + 1e-12)
+            if rms_db < -80.0:   # dead/silent — matches mastering_meta DEAD_RMS_DB
+                logger.info(f'DENOISE skip ch{c} (silent {rms_db:.0f} dB)', extra={'tui': False})
+            else:
+                to_denoise.append(c)
+        if to_denoise:
+            logger.info(f'DENOISE room ch{to_denoise} (afftdn)', extra={'tui': False})
+            for c in to_denoise:
                 raws[c] = _denoise_mono(raws[c], sr)
 
     # Pre-OTT level match: gain room channels to board level before compression.
