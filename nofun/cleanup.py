@@ -59,6 +59,29 @@ def cloud_filename(src_name: str) -> str:
     return _DATE_PREFIX_RE.sub('', src_name, count=1)
 
 
+def plan_cloud_copy(dest_exists: bool, legacy_exists: bool,
+                    legacy_dehydrated: bool, overwrite: bool) -> str:
+    """Decide how to place a file in its SharePoint folder.
+
+    Returns one of:
+      'overwrite' — a cloud copy already exists and overwrite was requested (replace in place)
+      'skip'      — cloud copy exists (and overwrite not requested), or only a dehydrated
+                    dated placeholder exists (renaming it would force a download)
+      'rename'    — a hydrated dated copy exists under the source name → rename in place
+      'copy'      — nothing in the folder yet → copy from source
+
+    Pure (no I/O) so the decision table can be unit-tested. Callers pass the results of
+    ``dest.exists()`` / ``legacy.exists()`` / ``is_cloud_only(legacy)``.
+    """
+    if dest_exists:
+        return 'overwrite' if overwrite else 'skip'
+    if legacy_exists and legacy_dehydrated:
+        return 'skip'
+    if legacy_exists:
+        return 'rename'
+    return 'copy'
+
+
 def expected_cloud_names(base: str, zip_src: pathlib.Path | None) -> list[str]:
     """Cloud filenames a performance will have once encoded: 4 quads + audio ZIP.
 

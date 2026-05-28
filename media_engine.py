@@ -58,6 +58,7 @@ from nofun.cleanup import (
     cloud_filename,
     expected_cloud_names,
     make_sharepoint_folder_name,
+    plan_cloud_copy,
     write_sharepoint_info,
 )
 from nofun.encoding_db import EncodingDB
@@ -1046,8 +1047,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                         or self.sharepoint_dest / wav_prefix
                     )
                     sp_wav.mkdir(exist_ok=True)
-                    shutil.copy(wav_path, sp_wav / cloud_filename(wav_path.name))
+                    sp_dst = sp_wav / cloud_filename(wav_path.name)
+                    shutil.copy(wav_path, sp_dst)
                     self.logger.info(f"SHARE   {wav_path.name} → {sp_wav.name}")
+                    dehydrate_cloud_files([sp_dst], self.logger)
 
         self.logger.info(f"REMASTER  {base}  done")
         self._remaster_status[perf_key] = 'ok'
@@ -1104,7 +1107,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 depends=[master_job.job_id],
             )
             jobs.append(reel_job)
-            python_fns[reel_job.job_id] = lambda p=perf: self._do_reel_for_perf(p)
+            python_fns[reel_job.job_id] = lambda p=perf: self._do_reel_for_perf(p, overwrite=True)
             cat_map[reel_job.job_id] = JobCategory.MANUAL  # user-initiated, no time gate
 
         perf_key = f"{short}_REMASTER"
@@ -2489,8 +2492,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self,
         perf: str,
         files: list[pathlib.Path],
+        overwrite: bool = False,
     ) -> None:
-        """Copy files to the SharePoint date folder for perf. No-op if SP not mounted."""
+        """Copy files to the SharePoint date folder for perf. No-op if SP not mounted.
+
+        overwrite=False (default): skip files already present in the cloud and skip
+        dehydrated dated placeholders — used by the normal lifecycle sync.
+        overwrite=True: replace an existing cloud copy in place (then re-dehydrate) —
+        used by REMASTER so a rebuilt reel supersedes the stale one.
+        """
         if not self.sharepoint_dest or not self.sharepoint_dest.is_dir():
             return
         if not files:
@@ -2511,20 +2521,28 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         )
         sp_folder.mkdir(exist_ok=True)
         for f in files:
-            dest = sp_folder / cloud_filename(f.name)
-            if dest.exists():
-                continue
+            dest   = sp_folder / cloud_filename(f.name)
             legacy = sp_folder / f.name
-            if legacy.exists() and is_cloud_only(legacy):
-                # Renaming a Files-On-Demand placeholder forces OneDrive to
-                # materialize (download) the full file first.  Skip — old dated
-                # copies expire on their own cadence.
+            action = plan_cloud_copy(
+                dest.exists(),
+                legacy.exists(),
+                legacy.exists() and is_cloud_only(legacy),
+                overwrite,
+            )
+            if action == 'skip':
+                # Already in cloud (and not overwriting), or only a dehydrated dated
+                # placeholder exists — renaming that would force a download.
                 continue
-            if legacy.exists():
-                # Existing dated copy → rename in place instead of re-upload.
+            if action == 'rename':
+                # Existing hydrated dated copy → rename in place instead of re-upload.
                 legacy.rename(dest)
                 self.logger.info(f"SHARE   renamed in cloud: {f.name} → {dest.name}")
-            else:
+            elif action == 'overwrite':
+                # REMASTER: replace the stale cloud copy with the rebuilt file.
+                shutil.copy(f, dest)
+                self.logger.info(f"SHARE   replaced in cloud: {dest.name}")
+                dehydrate_cloud_files([dest], self.logger)
+            else:  # 'copy'
                 shutil.copy(f, dest)
                 self.logger.info(f"SHARE   {f.name} → {sp_folder.name}")
 
@@ -2558,11 +2576,14 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._sync_perf_files(perf, zip_files)
         self.logger.info(f"SYNC    {perf}  audio done")
 
-    def _do_reel_for_perf(self, perf: str) -> None:
+    def _do_reel_for_perf(self, perf: str, overwrite: bool = False) -> None:
         """Render one reel per quad set for perf using the shared AUDIO MP3.
 
         A band can have multiple sessions on the same date (multiple quad sets);
         each gets its own reel file named after the quad base (e.g. *10.0_INSTAGRAM.mp4).
+
+        overwrite=True (REMASTER) replaces an existing cloud reel; the default
+        leaves the lifecycle sync's skip-if-exists behavior intact.
         """
         from nofun.reel import generate_reel
         base    = perf  # perf key matches zip/audio base name
@@ -2648,7 +2669,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self._app.clear_row('progress')
             self._clear_op('remaster')
             if ok and out.exists():
-                self._sync_perf_files(perf, [out])
+                self._sync_perf_files(perf, [out], overwrite=overwrite)
 
     def _sync_perf_reel(self, perf: str) -> None:
         """Copy the Instagram reel MP4(s) for perf to SharePoint."""

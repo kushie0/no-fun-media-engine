@@ -45,6 +45,13 @@ class InventoryMenuMixin:
             'expiry clock. If the folder was moved to archived/ it is moved back first.',
             'Updates _nofun_info.txt with re-uploaded timestamps.',
         ]),
+        ('REMASTER', 'Rebuild AUDIO + Instagram reel and replace both in SharePoint', [
+            'Re-runs mastering (room denoise + per-channel OTT + DyERS resonance',
+            'suppression) on the multitrack ZIP, then regenerates the Instagram reel',
+            'from the new AUDIO. Overwrites the AUDIO mp3 and the reel already in the',
+            'SharePoint folder so bands get the improved master. Press REMASTER again',
+            'while it runs to cancel and restart from scratch (force).',
+        ]),
         ('SCAN',     'Probe new + stale files and write to encoding_db.json', [
             'Collects .mp4 quads, .mov raws, .zip audio, clips, and SharePoint copies.',
             'Probes files not yet in the DB or whose mtime has changed (stale).',
