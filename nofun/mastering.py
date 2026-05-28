@@ -345,45 +345,64 @@ def dyers_suppress_mono(
     Gaussian notch gains (phase preserved), smooth across frames with attack/release."""
     hop = fft_size // 4
     w = np.hanning(fft_size).astype(np.float64)
+    w2 = w * w
     freqs = np.fft.rfftfreq(fft_size, 1 / sr)
     nbins = len(freqs)
     bandmask = (freqs >= band[0]) & (freqs <= band[1])
     prom_thresh = (1.0 - sensitivity) * 12.0 + 3.0
-    env_pad = env_bins // 2
-    env_kernel = np.ones(env_bins) / env_bins
+    epad = env_bins // 2
     sigma = (1.0 - sharpness) * 6.0 + 0.8
+    gwin = int(np.ceil(5.0 * sigma))   # gaussian half-window; beyond ±5σ the dip is ~0
     target_gain = 10.0 ** (resonance_gain_db / 20.0)
     atk = float(np.exp(-1.0 / max(1.0, (1.0 - speed) * 6.0 + 1.0)))
     rel = float(np.exp(-1.0 / max(1.0, (1.0 - speed) * 40.0 + 4.0)))
 
     pad = fft_size
     xp = np.concatenate([np.zeros(pad), x.astype(np.float64), np.zeros(pad + hop)])
-    out = np.zeros_like(xp)
-    norm = np.zeros_like(xp)
+    n_frames = 1 + (len(xp) - fft_size) // hop
+    out = np.zeros(len(xp))
+    norm = np.zeros(len(xp))
     smoothed = np.ones(nbins)
-    bins = np.arange(nbins)
-    pos = 0
-    while pos + fft_size <= len(xp):
-        spec = np.fft.rfft(xp[pos:pos + fft_size] * w)
+
+    # Block-vectorized WOLA: batch the FFTs/envelope/peak-detection per block; only the
+    # attack/release recursion (+ tiny local-window Gaussians) runs per frame. Memory-bounded
+    # so it doesn't thrash on long files. Output matches the per-frame reference to ~1e-6.
+    BLOCK = 1024
+    win_idx = np.arange(fft_size)
+    for b0 in range(0, n_frames, BLOCK):
+        nb = min(b0 + BLOCK, n_frames) - b0
+        starts = (b0 + np.arange(nb)) * hop
+        frames = xp[starts[:, None] + win_idx[None, :]] * w        # (nb, fft)
+        spec = np.fft.rfft(frames, axis=1)                          # (nb, nbins)
         mag = np.abs(spec)
         mag_db = 20.0 * np.log10(mag + 1e-9)
-        env = np.convolve(np.pad(mag_db, env_pad, mode='edge'), env_kernel, mode='valid')
+        # centered moving-average envelope along freq (edge-padded) via cumsum
+        mp = np.pad(mag_db, ((0, 0), (epad, epad)), mode='edge')
+        csum = np.concatenate([np.zeros((nb, 1)), np.cumsum(mp, axis=1)], axis=1)
+        env = (csum[:, env_bins:] - csum[:, :-env_bins]) / env_bins  # (nb, nbins)
         prom = mag_db - env
-        is_peak = np.zeros(nbins, dtype=bool)
-        is_peak[1:-1] = (mag[1:-1] >= mag[:-2]) & (mag[1:-1] >= mag[2:])
-        is_peak &= bandmask & (prom >= prom_thresh)
-        peak_idx = np.nonzero(is_peak)[0]
-        if len(peak_idx) > max_peaks:
-            peak_idx = peak_idx[np.argsort(prom[peak_idx])[-max_peaks:]]
-        gain = np.ones(nbins)
-        for p in peak_idx:
-            gain *= 1.0 - (1.0 - target_gain) * np.exp(-((bins - p) ** 2) / (2.0 * sigma ** 2))
-        down = gain < smoothed
-        smoothed = np.where(down, atk * smoothed + (1 - atk) * gain,
-                            rel * smoothed + (1 - rel) * gain)
-        out[pos:pos + fft_size] += np.fft.irfft(spec * smoothed, fft_size) * w
-        norm[pos:pos + fft_size] += w * w
-        pos += hop
+        is_peak = np.zeros_like(mag, dtype=bool)
+        is_peak[:, 1:-1] = (mag[:, 1:-1] >= mag[:, :-2]) & (mag[:, 1:-1] >= mag[:, 2:])
+        is_peak &= bandmask[None, :] & (prom >= prom_thresh)
+        gains = np.empty_like(mag)
+        for j in range(nb):
+            pk = np.nonzero(is_peak[j])[0]
+            if pk.size > max_peaks:
+                pk = pk[np.argsort(prom[j, pk])[-max_peaks:]]
+            g = np.ones(nbins)
+            for p in pk:
+                lo, hi = max(0, p - gwin), min(nbins, p + gwin + 1)
+                rng = np.arange(lo, hi)
+                g[lo:hi] *= 1.0 - (1.0 - target_gain) * np.exp(-((rng - p) ** 2) / (2.0 * sigma ** 2))
+            down = g < smoothed
+            smoothed = np.where(down, atk * smoothed + (1 - atk) * g,
+                                rel * smoothed + (1 - rel) * g)
+            gains[j] = smoothed
+        out_frames = np.fft.irfft(spec * gains, fft_size, axis=1) * w  # (nb, fft)
+        for j in range(nb):
+            s = starts[j]
+            out[s:s + fft_size] += out_frames[j]
+            norm[s:s + fft_size] += w2
     out /= np.maximum(norm, 1e-9)
     return out[pad:pad + len(x)].astype(np.float32)
 

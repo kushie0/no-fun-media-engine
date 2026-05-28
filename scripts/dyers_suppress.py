@@ -9,9 +9,13 @@ This script applies it to a standalone audio file for offline A/B. numpy only, n
 from __future__ import annotations
 
 import argparse
+import pathlib
+import sys
+
 import numpy as np
 import soundfile as sf
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from nofun.mastering import dyers_suppress_mono
 
 
