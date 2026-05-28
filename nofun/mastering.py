@@ -42,7 +42,7 @@ SELECTED_PANS: dict[int, float] = {
 }
 
 # Per-channel OTT knobs  (applied to every channel before mixing)
-OTT_CH_DEPTH:       float = 100.0  # overall effect amount      (0–100)
+OTT_CH_DEPTH:       float = 70.0   # overall effect amount      (0–100); 70 = "35" preset
 OTT_CH_UPWD_STRGTH: float = 100.0  # upward compression         (0–200)
 OTT_CH_DNWD_STRGTH: float = 100.0  # downward compression       (0–200)
 OTT_CH_THRESH_L:    float = 100.0  # low-band threshold         (0–200)
@@ -51,6 +51,28 @@ OTT_CH_THRESH_H:    float = 100.0  # high-band threshold        (0–200)
 OTT_CH_GAIN_L_DB:   float = 0.0  # low-band output level      (-inf–+6 dB)
 OTT_CH_GAIN_M_DB:   float = 0.0  # mid-band output level      (-inf–+6 dB)
 OTT_CH_GAIN_H_DB:   float = 0.0  # high-band output level     (-inf–+6 dB)
+
+# Per-group depth overrides. None = inherit OTT_CH_DEPTH (i.e. behave as before).
+# Set via --room-depth / --board-depth on the CLI to crush room hard while keeping board light.
+OTT_ROOM_DEPTH:  float | None = None
+OTT_BOARD_DEPTH: float | None = None
+
+# Feedback notch (Option C) — adaptive per-show resonance detection + notch. CLI-overridable.
+FEEDBACK_BAND: tuple[float, float] = (2000.0, 3000.0)
+FEEDBACK_PROMINENCE_DB: float = 8.0
+FEEDBACK_MAX: int = 4
+FEEDBACK_Q: float = 14.0
+FEEDBACK_CUT_DB: float = -14.0
+
+# DyERS dynamic resonance suppressor (post-OTT). Defaults = the "35 focused" preset.
+DYERS_BAND: tuple[float, float] = (1500.0, 6000.0)
+DYERS_SENSITIVITY: float = 0.6   # 0-1, higher = more peaks (lower prominence threshold)
+DYERS_SHARPNESS: float = 0.8     # 0-1, higher = narrower notch
+DYERS_SPEED: float = 0.5         # 0-1, higher = faster attack/release
+DYERS_RESONANCE_DB: float = -24.0
+DYERS_MAX_PEAKS: int = 4
+DYERS_FFT: int = 4096
+DYERS_ENV_BINS: int = 65
 
 # Master bus OTT knobs  (applied to the stereo mix after channel summing)
 OTT_MASTER_DEPTH:       float = 100.0  # overall effect amount  (0–100)
@@ -73,8 +95,8 @@ ROOM_CHANNELS:           list[int] = [29, 30]
 OTT_ROOM_UPWD_STRGTH:    float = 200.0   # max upward compression   (0–200)
 OTT_ROOM_DNWD_STRGTH:    float = 200.0   # max downward compression (0–200)
 OTT_ROOM_GAIN_L_DB:      float = -3.0    # pull back bass (board owns ~70%)
-OTT_ROOM_GAIN_M_DB:      float =  4.0    # push presence / vocals
-OTT_ROOM_GAIN_H_DB:      float =  3.0    # push air
+OTT_ROOM_GAIN_M_DB:      float =  6.0    # push presence / vocals ("35" preset)
+OTT_ROOM_GAIN_H_DB:      float =  5.0    # push air ("35" preset)
 
 # Board channels (31=L, 32=R) — bass-forward, vocal-reduced
 # Softer downward compression preserves bass transient punch.
@@ -83,8 +105,8 @@ BOARD_CHANNELS:          list[int] = [31, 32]
 OTT_BOARD_UPWD_STRGTH:   float = 100.0   # normal upward compression
 OTT_BOARD_DNWD_STRGTH:   float =  80.0   # softer downward (preserve bass punch)
 OTT_BOARD_GAIN_L_DB:     float =  4.0    # heavy bass boost
-OTT_BOARD_GAIN_M_DB:     float = -5.0    # cut mids / vocals
-OTT_BOARD_GAIN_H_DB:     float = -4.0    # cut highs
+OTT_BOARD_GAIN_M_DB:     float = -8.0    # cut mids / vocals ("35" preset)
+OTT_BOARD_GAIN_H_DB:     float = -7.0    # cut highs ("35" preset)
 
 
 OTT_PATHS: dict[str, list[str]] = {
@@ -239,6 +261,139 @@ def _ffmpeg_pipe(raw_in: bytes, sr: int, in_ch: int, filter_str: str, out_ch: in
     return result.stdout
 
 
+def _denoise_mono(mono: np.ndarray, sr: int, nr: float = 10.0, nf: float = -50.0) -> np.ndarray:
+    """FFT denoise (afftdn) a mono signal through an ffmpeg pipe. Length-preserving."""
+    raw_out = _ffmpeg_pipe(mono.astype(np.float32).tobytes(), sr, 1,
+                           f'afftdn=nr={nr}:nf={nf}', 1)
+    out = np.frombuffer(raw_out, dtype=np.float32).copy()
+    N = len(mono)
+    if len(out) < N:
+        out = np.pad(out, (0, N - len(out)))
+    return out[:N]
+
+
+def detect_resonant_peaks(
+    mono: np.ndarray, sr: int,
+    band: tuple[float, float] = (2000.0, 3000.0),
+    prominence_db: float = 8.0, max_peaks: int = 4,
+    nfft: int = 16384, smooth_bins: int = 121,
+) -> list[tuple[float, float]]:
+    """Return [(freq_hz, prominence_db), ...] of narrow spectral peaks within `band`,
+    sorted by prominence desc, capped at max_peaks. Empty if nothing stands out, so a
+    clean show notches nothing. Long-window Welch PSD isolates persistent resonance from
+    moving musical content; a wide moving-average baseline ignores broad tonal humps
+    (loud bass) and only flags narrow spikes."""
+    if len(mono) < nfft:
+        return []
+    win = np.hanning(nfft)
+    hop = nfft // 2
+    acc = np.zeros(nfft // 2 + 1)
+    n = 0
+    for s in range(0, len(mono) - nfft, hop):
+        acc += np.abs(np.fft.rfft(mono[s:s + nfft] * win)) ** 2
+        n += 1
+    if n == 0:
+        return []
+    psd_db = 10 * np.log10(acc / n + 1e-12)
+    freqs = np.fft.rfftfreq(nfft, 1 / sr)
+    pad = smooth_bins // 2
+    baseline = np.convolve(np.pad(psd_db, pad, mode='edge'),
+                           np.ones(smooth_bins) / smooth_bins, mode='valid')
+    prom = psd_db - baseline
+    out: list[tuple[float, float]] = []
+    for i in range(3, len(psd_db) - 3):
+        f = float(freqs[i])
+        if f < band[0] or f > band[1]:
+            continue
+        if psd_db[i] == max(psd_db[i - 3:i + 4]) and prom[i] >= prominence_db:
+            out.append((f, float(prom[i])))
+    out.sort(key=lambda t: -t[1])
+    return out[:max_peaks]
+
+
+def _apply_notches(left: np.ndarray, right: np.ndarray, sr: int,
+                   freqs: list[float], q: float = 14.0, cut_db: float = -14.0
+                   ) -> tuple[np.ndarray, np.ndarray]:
+    """Notch each freq with a narrow ffmpeg equalizer band; process stereo through one pipe."""
+    if not freqs:
+        return left, right
+    chain = ','.join(f'equalizer=f={f:.1f}:t=q:w={q:g}:g={cut_db:g}' for f in freqs)
+    N = len(left)
+    inter = np.empty(N * 2, dtype=np.float32)
+    inter[0::2] = left.astype(np.float32)
+    inter[1::2] = right.astype(np.float32)
+    raw = _ffmpeg_pipe(inter.tobytes(), sr, 2, chain, 2)
+    out = np.frombuffer(raw, dtype=np.float32)
+    m = (min(len(out), N * 2) // 2) * 2
+    l, r = out[0:m:2].copy(), out[1:m:2].copy()
+    if len(l) < N:
+        l = np.pad(l, (0, N - len(l)))
+        r = np.pad(r, (0, N - len(r)))
+    return l[:N], r[:N]
+
+
+def dyers_suppress_mono(
+    x: np.ndarray, sr: int, fft_size: int = DYERS_FFT,
+    sensitivity: float = DYERS_SENSITIVITY, sharpness: float = DYERS_SHARPNESS,
+    speed: float = DYERS_SPEED, resonance_gain_db: float = DYERS_RESONANCE_DB,
+    band: tuple[float, float] = DYERS_BAND, max_peaks: int = DYERS_MAX_PEAKS,
+    env_bins: int = DYERS_ENV_BINS,
+) -> np.ndarray:
+    """DyERS-style WOLA dynamic resonance suppressor (numpy port). Per STFT frame, detect
+    narrow peaks by LOCAL prominence (mag minus a moving-average envelope) — not a global
+    mean+std, which over-flags broadband HF and dulls the top end — cap to max_peaks, build
+    Gaussian notch gains (phase preserved), smooth across frames with attack/release."""
+    hop = fft_size // 4
+    w = np.hanning(fft_size).astype(np.float64)
+    freqs = np.fft.rfftfreq(fft_size, 1 / sr)
+    nbins = len(freqs)
+    bandmask = (freqs >= band[0]) & (freqs <= band[1])
+    prom_thresh = (1.0 - sensitivity) * 12.0 + 3.0
+    env_pad = env_bins // 2
+    env_kernel = np.ones(env_bins) / env_bins
+    sigma = (1.0 - sharpness) * 6.0 + 0.8
+    target_gain = 10.0 ** (resonance_gain_db / 20.0)
+    atk = float(np.exp(-1.0 / max(1.0, (1.0 - speed) * 6.0 + 1.0)))
+    rel = float(np.exp(-1.0 / max(1.0, (1.0 - speed) * 40.0 + 4.0)))
+
+    pad = fft_size
+    xp = np.concatenate([np.zeros(pad), x.astype(np.float64), np.zeros(pad + hop)])
+    out = np.zeros_like(xp)
+    norm = np.zeros_like(xp)
+    smoothed = np.ones(nbins)
+    bins = np.arange(nbins)
+    pos = 0
+    while pos + fft_size <= len(xp):
+        spec = np.fft.rfft(xp[pos:pos + fft_size] * w)
+        mag = np.abs(spec)
+        mag_db = 20.0 * np.log10(mag + 1e-9)
+        env = np.convolve(np.pad(mag_db, env_pad, mode='edge'), env_kernel, mode='valid')
+        prom = mag_db - env
+        is_peak = np.zeros(nbins, dtype=bool)
+        is_peak[1:-1] = (mag[1:-1] >= mag[:-2]) & (mag[1:-1] >= mag[2:])
+        is_peak &= bandmask & (prom >= prom_thresh)
+        peak_idx = np.nonzero(is_peak)[0]
+        if len(peak_idx) > max_peaks:
+            peak_idx = peak_idx[np.argsort(prom[peak_idx])[-max_peaks:]]
+        gain = np.ones(nbins)
+        for p in peak_idx:
+            gain *= 1.0 - (1.0 - target_gain) * np.exp(-((bins - p) ** 2) / (2.0 * sigma ** 2))
+        down = gain < smoothed
+        smoothed = np.where(down, atk * smoothed + (1 - atk) * gain,
+                            rel * smoothed + (1 - rel) * gain)
+        out[pos:pos + fft_size] += np.fft.irfft(spec * smoothed, fft_size) * w
+        norm[pos:pos + fft_size] += w * w
+        pos += hop
+    out /= np.maximum(norm, 1e-9)
+    return out[pad:pad + len(x)].astype(np.float32)
+
+
+def dyers_suppress_stereo(left: np.ndarray, right: np.ndarray, sr: int,
+                          **kw) -> tuple[np.ndarray, np.ndarray]:
+    """Apply DyERS suppression to a stereo pair (per channel)."""
+    return dyers_suppress_mono(left, sr, **kw), dyers_suppress_mono(right, sr, **kw)
+
+
 def make_approx_processor(sr: int) -> Callable[[np.ndarray], np.ndarray]:
     """Return a mono→mono ffmpeg 3-band compressor processor."""
     def process(mono: np.ndarray) -> np.ndarray:
@@ -390,7 +545,7 @@ def make_ott_board_processor(sr: int, logger: logging.Logger) -> Callable[[np.nd
     board = pedalboard.Pedalboard([plugin])
 
     def process(mono: np.ndarray) -> np.ndarray:
-        plugin.depth = OTT_CH_DEPTH
+        plugin.depth = OTT_BOARD_DEPTH if OTT_BOARD_DEPTH is not None else OTT_CH_DEPTH
         plugin.upwd_strgth = OTT_BOARD_UPWD_STRGTH
         plugin.dnwd_strgth = OTT_BOARD_DNWD_STRGTH
         plugin.thresh_l = OTT_CH_THRESH_L
@@ -414,7 +569,7 @@ def make_ott_room_processor(sr: int, logger: logging.Logger) -> Callable[[np.nda
     board = pedalboard.Pedalboard([plugin])
 
     def process(mono: np.ndarray) -> np.ndarray:
-        plugin.depth = OTT_CH_DEPTH
+        plugin.depth = OTT_ROOM_DEPTH if OTT_ROOM_DEPTH is not None else OTT_CH_DEPTH
         plugin.upwd_strgth = OTT_ROOM_UPWD_STRGTH
         plugin.dnwd_strgth = OTT_ROOM_DNWD_STRGTH
         plugin.thresh_l = OTT_CH_THRESH_L
@@ -559,12 +714,28 @@ def _mix_channels(
         np.ndarray], np.ndarray]] | None = None,
     align: bool = True,
     manual_offsets: dict[int, int] | None = None,
+    room_match: str | None = None,
+    denoise_room: bool = False,
+    room_spread: bool = False,
+    spread_ms: float = 14.0,
+    stats: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load, process, pan and sum channels into a stereo (L, R) pair.
+
+    stats: if a dict is passed, it's populated with Tier-1 metadata inputs —
+        'levels_db' {ch: (rms_db, peak_db)} (raw input) and 'align_ms' {ch: lag_ms}.
 
     ch_processor_map: per-channel OTT processor overrides.
     align: cross-correlate channels and trim for hardware timing offsets.
     manual_offsets: {ch: samples_ahead_of_ref} — bypasses auto-align when provided.
+    room_match: 'rms' | 'peak' — apply pre-OTT makeup gain to ROOM_CHANNELS so their
+        level matches BOARD_CHANNELS before compression. None = no matching.
+    denoise_room: if True, FFT-denoise ROOM_CHANNELS (afftdn) before any other processing.
+        Lets you crush room hard without lifting noise floor.
+    room_spread: if True, ROOM_CHANNELS are widened to pseudo-stereo via a complementary
+        comb (L = x + g·delay, R = x - g·delay) instead of mono panning. For a single live
+        room mic this gives stereo width; mono-compatible (L+R sums delayed part back out).
+    spread_ms: comb delay in ms for room_spread (controls comb spacing / width).
     """
     available = [ch for ch in channel_list if ch in channels]
     missing = [ch for ch in channel_list if ch not in channels]
@@ -582,10 +753,19 @@ def _mix_channels(
         mono, _ = _load_mono(channels[ch], start_sec, duration_sec)
         raws[ch] = mono
 
+    if stats is not None:  # raw input levels, before align/denoise/processing
+        lv: dict[int, tuple[float, float]] = {}
+        for ch in available:
+            a = raws[ch].astype(np.float64)
+            rms = float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+            peak = float(np.max(np.abs(a))) if a.size else 0.0
+            lv[ch] = (20.0 * math.log10(rms + 1e-12), 20.0 * math.log10(peak + 1e-12))
+        stats['levels_db'] = lv
+
     # Manual or auto alignment
+    leads: dict[int, int] = {}
     if manual_offsets is not None and len(available) > 1:
-        leads: dict[int, int] = {
-            ch: manual_offsets.get(ch, 0) for ch in available}
+        leads = {ch: manual_offsets.get(ch, 0) for ch in available}
         min_lead = min(leads.values())
         trims = {ch: leads[ch] - min_lead for ch in available}
         max_trim = max(trims.values())
@@ -603,7 +783,7 @@ def _mix_channels(
                     extra={'tui': False})
         max_lag = int(ALIGN_MAX_LAG_MS / 1000.0 * sr)
         ref_ch = ALIGN_REF_CHANNEL if ALIGN_REF_CHANNEL in raws else available[0]
-        leads: dict[int, int] = {ref_ch: 0}
+        leads = {ref_ch: 0}
         for ch in available:
             if ch == ref_ch:
                 continue
@@ -621,12 +801,43 @@ def _mix_channels(
                 + ', '.join(f'ch{ch}:{lag_ms[ch]:+.1f}ms' for ch in available)
             )
 
+    if stats is not None:
+        stats['align_ms'] = {ch: leads.get(ch, 0) / sr * 1000.0 for ch in available}
+
+    # Pre-OTT denoise on room channels — strip noise floor before upward compression amplifies it.
+    if denoise_room:
+        room_present = [c for c in ROOM_CHANNELS if c in raws]
+        if room_present:
+            logger.info(f'DENOISE room ch{room_present} (afftdn)', extra={'tui': False})
+            for c in room_present:
+                raws[c] = _denoise_mono(raws[c], sr)
+
+    # Pre-OTT level match: gain room channels to board level before compression.
+    if room_match and len(raws) > 1:
+        room_present = [c for c in ROOM_CHANNELS if c in raws]
+        board_present = [c for c in BOARD_CHANNELS if c in raws]
+        if room_present and board_present:
+            def _lvl(arr: np.ndarray) -> float:
+                a = arr.astype(np.float64)
+                if room_match == 'peak':
+                    return float(np.max(np.abs(a))) or 1e-9
+                return float(np.sqrt(np.mean(a ** 2))) or 1e-9
+            room_lvl = float(np.mean([_lvl(raws[c]) for c in room_present]))
+            board_lvl = float(np.mean([_lvl(raws[c]) for c in board_present]))
+            gain = board_lvl / room_lvl if room_lvl > 0 else 1.0
+            for c in room_present:
+                raws[c] = (raws[c].astype(np.float32) * gain).astype(np.float32)
+            logger.info(
+                f'MATCH   room->board ({room_match}): {20 * math.log10(max(gain, 1e-9)):+.1f} dB '
+                f'applied to ch{room_present}', extra={'tui': False})
+
     N = min(len(v) for v in raws.values())
     left = np.zeros(N, dtype=np.float32)
     right = np.zeros(N, dtype=np.float32)
 
     logger.info(f'MASTER  processing {len(available)} ch  ({N / sr / 60:.1f} min)',
                 extra={'tui': False})
+    spread_delay = int(spread_ms / 1000.0 * sr) if room_spread else 0
     for ch in available:
         mono = raws[ch][:N]
         if len(mono) < N:
@@ -635,9 +846,20 @@ def _mix_channels(
         proc = (ch_processor_map.get(ch)
                 if ch_processor_map else None) or channel_processor
         processed = proc(mono)
-        l_w, r_w = _pan_weights(pan_map.get(ch, 0.0))
-        left += processed * l_w
-        right += processed * r_w
+
+        if room_spread and ch in ROOM_CHANNELS and spread_delay > 0:
+            # Complementary comb pseudo-stereo: L = x + g·delay, R = x - g·delay.
+            # Scaled 0.5 so the mono sum (L+R) returns to unity — mono-compatible.
+            delayed = np.empty_like(processed)
+            delayed[:spread_delay] = 0.0
+            delayed[spread_delay:] = processed[:-spread_delay]
+            g = 0.8
+            left += 0.5 * (processed + g * delayed)
+            right += 0.5 * (processed - g * delayed)
+        else:
+            l_w, r_w = _pan_weights(pan_map.get(ch, 0.0))
+            left += processed * l_w
+            right += processed * r_w
 
     return left, right
 
@@ -872,6 +1094,12 @@ def generate_masters(
     slow: int = 1,
     slow_hq: int = 1,
     script_runner=None,  # ScriptRunner | None — passed to _write_stereo_mp3
+    room_match: str | None = None,
+    denoise_room: bool = False,
+    room_spread: bool = False,
+    spread_ms: float = 14.0,
+    kill_feedback: bool = False,
+    dyers: bool = False,
 ) -> list[Path]:
     """Generate stereo WAV masters for one (date, band) performance group.
 
@@ -981,6 +1209,9 @@ def generate_masters(
     audio_dest.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
+    from nofun import mastering_meta as _meta
+    write_meta = _meta.should_write_metadata(selected_only, clip)
+
     import time as _time
     for mix_name, proc_name, ch_list, pan_map, ch_proc, master_proc in combos:
         label = 'AUDIO' if selected_only else f'master_{mix_name}_{proc_name}'
@@ -993,15 +1224,44 @@ def generate_masters(
             log.info(
                 f'MASTER  mixing  ({mix_name}/{proc_name})', extra={'tui': False})
             t0 = _time.monotonic()
+            mstats: dict | None = {} if write_meta else None
             result = _mix_channels(channels, ch_list, pan_map, ch_proc, sr, log,
                                    start_sec=start_sec, duration_sec=duration_sec,
                                    ch_processor_map=proc_map if proc_name == 'ott' else None,
                                    align=align,
-                                   manual_offsets=manual_offsets)
+                                   manual_offsets=manual_offsets,
+                                   room_match=room_match,
+                                   denoise_room=denoise_room,
+                                   room_spread=room_spread,
+                                   spread_ms=spread_ms,
+                                   stats=mstats)
             if result is None:
                 continue
+            # Metadata feedback snapshot — what the room was doing, from the clean pre-master mix.
+            meta_peaks = (detect_resonant_peaks((result[0] + result[1]) * 0.5, sr,
+                                                band=DYERS_BAND, prominence_db=6.0, max_peaks=6)
+                          if write_meta else [])
+            if kill_feedback:
+                mono_sum = (result[0] + result[1]) * 0.5
+                peaks = detect_resonant_peaks(
+                    mono_sum, sr, band=FEEDBACK_BAND,
+                    prominence_db=FEEDBACK_PROMINENCE_DB, max_peaks=FEEDBACK_MAX)
+                if peaks:
+                    log.info('FEEDBACK notch: ' + ', '.join(
+                        f'{f:.0f}Hz(+{p:.1f}dB)' for f, p in peaks))
+                    result = _apply_notches(result[0], result[1], sr,
+                                            [f for f, _ in peaks],
+                                            q=FEEDBACK_Q, cut_db=FEEDBACK_CUT_DB)
+                else:
+                    log.info(
+                        f'FEEDBACK none found in {FEEDBACK_BAND[0]:.0f}-{FEEDBACK_BAND[1]:.0f}Hz')
             log.info('MASTER  applying bus processor', extra={'tui': False})
             left, right = master_proc(result[0], result[1])
+            if dyers:
+                log.info(
+                    f'DYERS   dynamic suppress {DYERS_BAND[0]:.0f}-{DYERS_BAND[1]:.0f}Hz',
+                    extra={'tui': False})
+                left, right = dyers_suppress_stereo(left, right, sr)
             log.info(f'WRITE   {out_path.name}', extra={'tui': False})
             if slow_hq > 1:
                 import pyrubberband as rb
@@ -1023,6 +1283,34 @@ def generate_masters(
             elapsed = _time.monotonic() - t0
             written.append(out_path)
             log.info(f'MASTER  {out_path.name}  ({elapsed:.0f}s)')
+
+            if write_meta and mstats is not None:
+                try:
+                    levels = mstats.get('levels_db', {})
+                    chans = _meta.channel_stats(levels, mstats.get('align_ms', {}))
+                    def _avg_rms(chs):  # live channels only — dead ones skew the average
+                        vals = [levels[c][0] for c in chs
+                                if c in levels and levels[c][0] >= _meta.DEAD_RMS_DB]
+                        return sum(vals) / len(vals) if vals else 0.0
+                    room_board = {'rms_delta_db': round(_avg_rms(ROOM_CHANNELS) - _avg_rms(BOARD_CHANNELS), 1)}
+                    recipe = {
+                        'ch_depth': OTT_CH_DEPTH,
+                        'room_gain_db': [OTT_ROOM_GAIN_L_DB, OTT_ROOM_GAIN_M_DB, OTT_ROOM_GAIN_H_DB],
+                        'board_gain_db': [OTT_BOARD_GAIN_L_DB, OTT_BOARD_GAIN_M_DB, OTT_BOARD_GAIN_H_DB],
+                        'master_gain_db': [OTT_MASTER_GAIN_L_DB, OTT_MASTER_GAIN_M_DB, OTT_MASTER_GAIN_H_DB],
+                        'denoise_room': denoise_room,
+                        'dyers': ({'band': list(DYERS_BAND), 'sensitivity': DYERS_SENSITIVITY,
+                                   'sharpness': DYERS_SHARPNESS, 'resonance_db': DYERS_RESONANCE_DB,
+                                   'max_peaks': DYERS_MAX_PEAKS} if dyers else None),
+                    }
+                    flags = _meta.derive_flags(chans, room_board, meta_peaks)
+                    meta = _meta.build_metadata(base, recipe, chans, room_board, meta_peaks, flags)
+                    meta_dir = audio_dest / 'mastering_meta'
+                    _meta.write_sidecar(meta, meta_dir, base)
+                    _meta.append_log(meta, meta_dir)
+                    _meta.log_summary(meta, log)
+                except Exception as me:
+                    log.warning(f'METADATA  failed for {base}: {me!r}')
         except Exception as e:
             log.warning(f'MASTER  failed ({mix_name}/{proc_name}): {e}')
 
@@ -1083,6 +1371,36 @@ if __name__ == '__main__':
                         help='Print all knobs exposed by the OTT plugin and exit')
     parser.add_argument('--flat', action='store_true',
                         help='Reset all OTT gains to factory defaults (all band gains=0, in/out gain=0, upwd=100) before any other overrides')
+    parser.add_argument('--ch-depth', type=float, default=None, metavar='0-100',
+                        help=f'Per-channel OTT depth / overall effect amount (default {OTT_CH_DEPTH:g})')
+    parser.add_argument('--room-depth', type=float, default=None, metavar='0-100',
+                        help='Per-channel OTT depth for ROOM ch (29/30); falls back to --ch-depth')
+    parser.add_argument('--board-depth', type=float, default=None, metavar='0-100',
+                        help='Per-channel OTT depth for BOARD ch (31/32); falls back to --ch-depth')
+    parser.add_argument('--master-depth', type=float, default=None, metavar='0-100',
+                        help=f'Master-bus OTT depth / overall effect amount (default {OTT_MASTER_DEPTH:g})')
+    parser.add_argument('--match-room', choices=['rms', 'peak'], default=None,
+                        help='Pre-OTT: gain room ch (29/30) to match board ch (31/32) level (rms or peak)')
+    parser.add_argument('--denoise-room', action='store_true',
+                        help='Pre-OTT: FFT-denoise (afftdn) room ch (29/30) before any other processing')
+    parser.add_argument('--room-spread', action='store_true',
+                        help='Widen room ch (29/30) to pseudo-stereo via complementary comb (good for a single room mic)')
+    parser.add_argument('--spread-ms', type=float, default=14.0, metavar='MS',
+                        help='Comb delay in ms for --room-spread (default 14)')
+    parser.add_argument('--dyers', action='store_true',
+                        help='Post-OTT DyERS dynamic resonance suppression (the 35-focused preset)')
+    parser.add_argument('--kill-feedback', action='store_true',
+                        help='Detect narrow resonances in --feedback-band and notch them per show')
+    parser.add_argument('--feedback-band', nargs=2, type=float, default=None, metavar=('LO', 'HI'),
+                        help=f'Hz range to scan (default {FEEDBACK_BAND[0]:g}-{FEEDBACK_BAND[1]:g})')
+    parser.add_argument('--feedback-prominence', type=float, default=None, metavar='DB',
+                        help=f'Min dB above baseline to count as a peak (default {FEEDBACK_PROMINENCE_DB:g})')
+    parser.add_argument('--feedback-max', type=int, default=None, metavar='N',
+                        help=f'Max notches (default {FEEDBACK_MAX})')
+    parser.add_argument('--feedback-cut', type=float, default=None, metavar='DB',
+                        help=f'Notch depth dB (default {FEEDBACK_CUT_DB:g})')
+    parser.add_argument('--feedback-q', type=float, default=None, metavar='Q',
+                        help=f'Notch Q / narrowness (default {FEEDBACK_Q:g})')
     # Per-run gain overrides (override module-level constants for this invocation only)
     gains = parser.add_argument_group('gain overrides (dB)')
     gains.add_argument('--room-l', type=float, default=None, metavar='DB',
@@ -1151,6 +1469,24 @@ if __name__ == '__main__':
         OTT_MASTER_IN_GAIN_DB = args.in_gain
     if args.out_gain is not None:
         OTT_MASTER_OUT_GAIN_DB = args.out_gain
+    if args.ch_depth is not None:
+        OTT_CH_DEPTH = args.ch_depth
+    if args.room_depth is not None:
+        OTT_ROOM_DEPTH = args.room_depth
+    if args.board_depth is not None:
+        OTT_BOARD_DEPTH = args.board_depth
+    if args.master_depth is not None:
+        OTT_MASTER_DEPTH = args.master_depth
+    if args.feedback_band is not None:
+        FEEDBACK_BAND = (args.feedback_band[0], args.feedback_band[1])
+    if args.feedback_prominence is not None:
+        FEEDBACK_PROMINENCE_DB = args.feedback_prominence
+    if args.feedback_max is not None:
+        FEEDBACK_MAX = args.feedback_max
+    if args.feedback_cut is not None:
+        FEEDBACK_CUT_DB = args.feedback_cut
+    if args.feedback_q is not None:
+        FEEDBACK_Q = args.feedback_q
     if args.align_ref is not None:
         ALIGN_REF_CHANNEL = args.align_ref
 
@@ -1289,6 +1625,12 @@ if __name__ == '__main__':
             manual_offsets=manual_offsets,
             slow=args.slow,
             slow_hq=args.slow_hq,
+            room_match=args.match_room,
+            denoise_room=args.denoise_room,
+            room_spread=args.room_spread,
+            spread_ms=args.spread_ms,
+            kill_feedback=args.kill_feedback,
+            dyers=args.dyers,
         )
         # Copy to SharePoint date folder if found and output is the default audio_dest
         if written and args.output is None:
