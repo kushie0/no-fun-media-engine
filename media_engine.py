@@ -1067,7 +1067,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 pass
 
     def _enqueue_remaster(self, date_str: str, trial_seconds: int = 0, force: bool = False,
-                          band: str | None = None) -> None:
+                          band: str | None = None, reel_overwrite: bool = True) -> None:
         """Enqueue one REMASTER + REEL job pair per band for *date_str*.
 
         Each band gets a REMASTER (MANUAL) job followed by a REEL (GPU_BOUND)
@@ -1112,7 +1112,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 depends=[master_job.job_id],
             )
             jobs.append(reel_job)
-            python_fns[reel_job.job_id] = lambda p=perf: self._do_reel_for_perf(p, overwrite=True)
+            python_fns[reel_job.job_id] = lambda p=perf, _o=reel_overwrite: self._do_reel_for_perf(p, overwrite=_o)
             cat_map[reel_job.job_id] = JobCategory.MANUAL  # user-initiated, no time gate
 
         perf_key = f"{short}_{band}_REMASTER" if band else f"{short}_REMASTER"
@@ -1127,6 +1127,51 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 f"REMASTER  queued {len(bands)} band(s)"
                 " — type REMASTER again to restart from scratch"
             )
+
+    def _finish_incomplete_shows(self) -> None:
+        """Reconciler: queue REMASTER+REEL for recent shows that have local quads
+        + ZIP but are missing the AUDIO master or INSTAGRAM reel on disk.
+
+        Recovers shows interrupted after quads+ZIP but before master/reel (e.g. an
+        engine restart) — the watchdog never re-detects them once raw sources are
+        swept, and the per-perf manifest gates master/reel behind fresh
+        encode/audio jobs. Master/reel presence is read from disk because the
+        encoding DB intentionally does not track those output types.
+        """
+        if not self._status_entries:
+            return
+        active_keys = {qj.manifest_key for qj in self._job_queue.all_active()}
+        today  = datetime.date.today()
+        queued = 0
+        for (date, band), ps in self._status_entries:
+            if band in ('NOFUN', 'TBD', ''):
+                continue
+            if not (ps.zip_files and len(ps.quad_files) >= 4):
+                continue
+            short = date[2:] if date.startswith('20') else date  # normalise to YY-MM-DD
+            try:
+                y, mo, d = short.split('-')
+                rec_date = datetime.date(2000 + int(y), int(mo), int(d))
+            except (ValueError, AttributeError):
+                continue
+            if (today - rec_date).days > EXPIRE_AGE:
+                continue
+            perf    = f'{short}_{band}'
+            audio   = self.audio_dest / f'{perf}_AUDIO.mp3'
+            reel_ok = any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
+            if audio.exists() and reel_ok:
+                continue
+            if f'{short}_{band}_REMASTER' in active_keys or perf in self._enqueued_keys:
+                continue
+            miss = ' '.join(filter(None, [
+                '' if audio.exists() else 'AUDIO',
+                '' if reel_ok else 'REEL',
+            ]))
+            self.logger.info(f'FINISH  {perf} missing {miss} — queuing REMASTER+REEL')
+            self._enqueue_remaster(date, band=band, reel_overwrite=False)
+            queued += 1
+        if queued:
+            self.logger.info(f'FINISH  queued {queued} incomplete show(s)')
 
     # -----------------------------------------------------------------------
     # Trial summary
@@ -2944,6 +2989,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
           EXPIRE CLOUD SHARES — 3600s  (1 hr)
           EXPIRE RAW FILES    — 3600s  (1 hr)
           DEHYDRATE SWEEP     — 14400s (4 hr)
+          FINISH INCOMPLETE   — 3600s  (1 hr)
           AUTO SCAN           — 3600s  (1 hr)
           AUTO CLEANUP        — 21600s (6 hr) — multi-job manifest, deduped by manifest key
         """
@@ -2958,6 +3004,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             ('EXPIRE CLOUD SHARES', '_expire',       self._auto_expire_cloud_shares,   3600.0),
             ('EXPIRE RAW FILES',    '_expire_raw',   self._auto_expire_raw_files,      3600.0),
             ('DEHYDRATE SWEEP',     '_dehydrate',    self._dehydration_sweep,         14400.0),
+            ('FINISH INCOMPLETE',   '_finish',       self._finish_incomplete_shows,    3600.0),
         ]
         for label, kind, fn, interval in tasks:
             last = self._last_scheduled_enqueued.get(label, 0.0)

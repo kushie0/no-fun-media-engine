@@ -267,3 +267,126 @@ class TestRemasterStatusTracker:
             fp._do_reel_for_perf('26-05-13_Mystery')
         warns = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any('REMASTER status: unknown' in m for m in warns)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _finish_incomplete_shows reconciler (no ffmpeg required)
+# ---------------------------------------------------------------------------
+
+class _FakeQueue:
+    def __init__(self, active_keys: list[str] | None = None) -> None:
+        self._active = [type('J', (), {'manifest_key': k})() for k in (active_keys or [])]
+
+    def all_active(self) -> list:
+        return self._active
+
+
+class _FakePipelineFinish:
+    """Minimal Pipeline stand-in for _finish_incomplete_shows (no ffmpeg/DB)."""
+
+    def __init__(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None) -> None:
+        self.audio_dest = tmp_path / 'audio'
+        self.vids_dest  = tmp_path / 'videos'
+        for d in (self.audio_dest, self.vids_dest):
+            d.mkdir(parents=True, exist_ok=True)
+        self.logger          = logging.getLogger('test_finish')
+        self._status_entries: list = []
+        self._enqueued_keys: set   = set()
+        self._job_queue            = _FakeQueue(active_keys)
+        self.remaster_calls: list  = []
+
+    def _enqueue_remaster(self, date: str, band: str | None = None,
+                          reel_overwrite: bool = True, **_: Any) -> None:
+        self.remaster_calls.append((date, band, reel_overwrite))
+
+
+class TestFinishIncompleteShows:
+    def _make(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None):
+        from media_engine import Pipeline
+        fp = _FakePipelineFinish(tmp_path, active_keys)
+        fp._finish_incomplete_shows = Pipeline._finish_incomplete_shows.__get__(fp)
+        return fp
+
+    @staticmethod
+    def _recent_date(days_ago: int = 1) -> str:
+        import datetime
+        return f'{datetime.date.today() - datetime.timedelta(days=days_ago):%y-%m-%d}'
+
+    @staticmethod
+    def _ps(date: str, band: str):
+        from nofun.inventory import PerformanceState
+        ps = PerformanceState(date=date, band=band)
+        ps.zip_files  = [pathlib.Path(f'{date}_{band}_MULTITRACK.zip')]
+        ps.quad_files = [pathlib.Path(f'{date}_{band}_CAM{n}.mp4') for n in (1, 2, 3, 4)]
+        return ps
+
+    def test_missing_both_enqueues_with_overwrite_false(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == [(date, 'Jermey_Gold', False)]
+
+    def test_already_finished_skipped(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        perf = f'{date}_Jermey_Gold'
+        (fp.audio_dest / f'{perf}_AUDIO.mp3').write_bytes(b'x')
+        (fp.vids_dest / f'{perf}.0_INSTAGRAM.mp4').write_bytes(b'x')
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_missing_reel_only_enqueues(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        perf = f'{date}_Jermey_Gold'
+        (fp.audio_dest / f'{perf}_AUDIO.mp3').write_bytes(b'x')  # master present, reel absent
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == [(date, 'Jermey_Gold', False)]
+
+    def test_nofun_band_skipped(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'NOFUN'), self._ps(date, 'NOFUN'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_too_old_skipped(self, tmp_path):
+        date = self._recent_date(days_ago=40)
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_no_zip_or_few_quads_skipped(self, tmp_path):
+        from nofun.inventory import PerformanceState
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        no_zip = PerformanceState(date=date, band='Jermey_Gold')
+        no_zip.zip_files  = []
+        no_zip.quad_files = [pathlib.Path('a'), pathlib.Path('b'), pathlib.Path('c'), pathlib.Path('d')]
+        few_quads = self._ps(date, 'Other')
+        few_quads.quad_files = few_quads.quad_files[:2]
+        fp._status_entries = [
+            ((date, 'Jermey_Gold'), no_zip),
+            ((date, 'Other'), few_quads),
+        ]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_already_in_flight_skipped(self, tmp_path):
+        date = self._recent_date()
+        # active REMASTER manifest for this perf
+        fp = self._make(tmp_path, active_keys=[f'{date}_Jermey_Gold_REMASTER'])
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+        # main manifest still enqueued
+        fp2 = self._make(tmp_path)
+        fp2._enqueued_keys = {f'{date}_Jermey_Gold'}
+        fp2._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp2._finish_incomplete_shows()
+        assert fp2.remaster_calls == []
