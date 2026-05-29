@@ -648,12 +648,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             try:
                 y, mo, d = date_str.split('-')
-                rec_date = datetime.date(int(y), int(mo), int(d))
+                rec_date = datetime.date(2000 + int(y), int(mo), int(d))
             except (ValueError, AttributeError):
                 continue
             if (datetime.date.today() - rec_date).days >= EXPIRE_AGE:
                 continue
-            date_prefix = rec_date.strftime('%y-%m-%d')
+            date_prefix = date_str
             eligible.append((date_prefix, date_str, band, rec_date, ul_file))
 
         # Cloud filenames each date folder should eventually hold (all bands).
@@ -801,13 +801,13 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         try:
-            parts    = date_str.split('-')
-            rec_date = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+            parts = date_str.split('-')
+            datetime.date(2000 + int(parts[0]), int(parts[1]), int(parts[2]))  # validate
         except (ValueError, IndexError):
             self.logger.info(f"REUPLOAD: could not parse date {date_str!r}")
             return
 
-        date_prefix = rec_date.strftime('%y-%m-%d')
+        date_prefix = date_str
 
         dest = self._find_date_folder(self.sharepoint_dest, date_prefix)
 
@@ -1039,17 +1039,16 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             for wav_path in results:
                 wav_date, _ = _edb(wav_path.stem)
                 if wav_date != 'TBD':
-                    try:
-                        parts = wav_date.split('-')
-                        wav_prefix = f"{parts[0][2:]}-{parts[1]}-{parts[2]}"
-                    except (IndexError, ValueError):
-                        wav_prefix = wav_date
+                    wav_prefix = wav_date   # already YY-MM-DD
                     sp_wav = (
                         self._find_date_folder(self.sharepoint_dest, wav_prefix)
                         or self.sharepoint_dest / wav_prefix
                     )
                     sp_wav.mkdir(exist_ok=True)
-                    sp_dst = sp_wav / cloud_filename(wav_path.name)
+                    # strip _MULTITRACK so the remaster overwrites the original
+                    # <BAND>_AUDIO.mp3 instead of landing beside it
+                    cloud_name = cloud_filename(wav_path.name).replace('_MULTITRACK', '')
+                    sp_dst = sp_wav / cloud_name
                     shutil.copy(wav_path, sp_dst)
                     self.logger.info(f"SHARE   {wav_path.name} → {sp_wav.name}")
                     dehydrate_cloud_files([sp_dst], self.logger)
@@ -1567,11 +1566,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._show_groups = []
         for date in sorted(by_date.keys(), reverse=True):
             perf_list = by_date[date]
-            try:
-                parts = date.split('-')
-                date_prefix = f"{parts[0][2:]}-{parts[1]}-{parts[2]}"  # YYYY→YY
-            except (IndexError, ValueError):
-                date_prefix = date
+            date_prefix = date   # already YY-MM-DD
             # Build display name directly from band names — no SharePoint logic.
             # SP folder operations (REUPLOAD) do their own naming independently.
             bands = [ps.band for ps in perf_list
@@ -2138,7 +2133,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             try:
                 y, mo, d = date_str.split('-')
-                date_prefix = datetime.date(int(y), int(mo), int(d)).strftime('%y-%m-%d')
+                datetime.date(2000 + int(y), int(mo), int(d))   # validate
+                date_prefix = date_str
             except (ValueError, AttributeError):
                 continue
             if date_prefix not in new_by_date:
@@ -2179,7 +2175,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             # we expect (4 quads + audio ZIP per band) with a "processing…"
             # marker; SYNC overwrites this with the final form as files land.
             y, mo, d  = date_str.split('-')  # validated when new_by_date was built
-            rec_date  = datetime.date(int(y), int(mo), int(d))
+            rec_date  = datetime.date(2000 + int(y), int(mo), int(d))
             expected: set[str] = set()
             for mov in all_movs:
                 m_date, m_band = extract_date_band(mov.stem)
