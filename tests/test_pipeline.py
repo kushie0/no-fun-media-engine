@@ -337,6 +337,33 @@ class TestRemasterStatusTracker:
         assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'ok'
         assert any('resolved stale ZIP path' in r.message for r in caplog.records)
 
+    def test_empty_masters_marks_no_audio(
+        self, tmp_path: pathlib.Path, monkeypatch: Any
+    ) -> None:
+        # Regression (Finding 2): when the source WAVs are missing/unusable,
+        # generate_masters returns [] and writes no file. The remaster must mark
+        # 'no_audio' (terminal) instead of 'ok' — otherwise the REEL skips and the
+        # hourly reconciler re-queues the show forever.
+        # Stub mastering/reel in sys.modules so the run needs no numpy/scipy.
+        import sys, types
+        from nofun.inventory import PerformanceState
+        fake_mastering = types.ModuleType('nofun.mastering')
+        fake_mastering.generate_masters = lambda *a, **k: []   # wrote nothing
+        fake_mastering._ott_plugin_cache = object()            # not None → skip reset
+        fake_reel = types.ModuleType('nofun.reel')
+        fake_reel.generate_reel = lambda *a, **k: None
+        monkeypatch.setitem(sys.modules, 'nofun.mastering', fake_mastering)
+        monkeypatch.setitem(sys.modules, 'nofun.reel', fake_reel)
+
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-25', band='Flatwounds')
+        zip_path = fp.audio_dest / '26-05-25_Flatwounds_MULTITRACK.zip'
+        with zf.ZipFile(zip_path, 'w') as z:
+            z.writestr('ch1.wav', b'RIFF')   # non-empty so wav_files isn't empty
+        ps.zip_files = [zip_path]
+        fp._do_remaster_for_band('2026-05-25', ps)
+        assert fp._remaster_status.get('26-05-25_Flatwounds') == 'no_audio'
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — _finish_incomplete_shows reconciler (no ffmpeg required)

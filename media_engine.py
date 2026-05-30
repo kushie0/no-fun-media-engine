@@ -1058,6 +1058,22 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self._clear_op('remaster')
                 return
 
+        # Mastering can return cleanly having written nothing — e.g. the ZIP's
+        # WAVs were all silent/missing so every channel combo was skipped. Treat
+        # "no audio file on disk" as terminal, not success: otherwise the show
+        # records 'ok', its REEL skips with "AUDIO not found", and the hourly
+        # reconciler re-queues it forever. Cleared on restart, so a genuine
+        # retry (once the WAVs exist) needs an engine bounce.
+        results = [p for p in results if p.exists() and p.stat().st_size > 0]
+        if not results:
+            self.logger.warning(
+                f"REMASTER  {base}  no audio master produced "
+                f"(missing or unusable source WAVs in {zip_path.name})"
+            )
+            self._remaster_status[perf_key] = 'no_audio'
+            self._clear_op('remaster')
+            return
+
         # Copy AUDIO to SharePoint date folder
         if self.sharepoint_dest and self.sharepoint_dest.is_dir():
             from nofun.inventory import extract_date_band as _edb
@@ -1197,7 +1213,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             if any(qj.manifest_key == rk for qj in self._job_queue.all_active()) \
                     or perf in self._enqueued_keys:
                 continue
-            if self._remaster_status.get(perf) in ('mastering_error', 'no_zip', 'zip_empty'):
+            if self._remaster_status.get(perf) in ('mastering_error', 'no_zip', 'zip_empty', 'no_audio'):
                 # A prior attempt this session failed terminally (no usable ZIP,
                 # or mastering crashed) — re-queuing hourly just spams the queue
                 # and log. Cleared on restart, so a genuine retry needs a bounce.
