@@ -344,10 +344,13 @@ class TestRemasterStatusTracker:
 
 class _FakeQueue:
     def __init__(self, active_keys: list[str] | None = None) -> None:
-        self._active = [type('J', (), {'manifest_key': k})() for k in (active_keys or [])]
+        self._active: list = [type('J', (), {'manifest_key': k})() for k in (active_keys or [])]
 
     def all_active(self) -> list:
         return self._active
+
+    def add(self, manifest_key: str) -> None:
+        self._active.append(type('J', (), {'manifest_key': manifest_key})())
 
 
 class _FakePipelineFinish:
@@ -372,6 +375,10 @@ class _FakePipelineFinish:
     def _enqueue_remaster(self, date: str, band: str | None = None,
                           reel_overwrite: bool = True, **_: Any) -> None:
         self.remaster_calls.append((date, band, reel_overwrite))
+        # Mirror the real _job_queue.enqueue: the REMASTER manifest becomes
+        # live immediately, so a later iteration sees it via all_active().
+        short = date[2:] if date.startswith('20') else date
+        self._job_queue.add(f'{short}_{band}_REMASTER' if band else f'{short}_REMASTER')
 
 
 class TestFinishIncompleteShows:
@@ -477,3 +484,18 @@ class TestFinishIncompleteShows:
             fp._remaster_status = {f'{date}_Flatwounds': status}
             fp._finish_incomplete_shows()
             assert fp.remaster_calls == [], f'should skip after {status}'
+
+    def test_duplicate_status_rows_enqueue_once(self, tmp_path):
+        # Regression (Bug B, in-loop): two _status_entries rows that normalise
+        # to the same perf (here a 4-digit vs 2-digit year for one show) must
+        # enqueue exactly one REMASTER. A pre-loop active_keys snapshot missed
+        # the first row's just-enqueued job, so both rows queued.
+        short = self._recent_date()           # YY-MM-DD
+        long  = f'20{short}'                  # YYYY-MM-DD, same show
+        fp = self._make(tmp_path)
+        fp._status_entries = [
+            ((long,  'Jermey_Gold'), self._ps(long,  'Jermey_Gold')),
+            ((short, 'Jermey_Gold'), self._ps(short, 'Jermey_Gold')),
+        ]
+        fp._finish_incomplete_shows()
+        assert len(fp.remaster_calls) == 1, fp.remaster_calls

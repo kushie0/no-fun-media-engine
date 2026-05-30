@@ -1169,7 +1169,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._rebuild_status_entries()
         if not self._status_entries:
             return
-        active_keys = {qj.manifest_key for qj in self._job_queue.all_active()}
         today  = datetime.date.today()
         queued = 0
         for (date, band), ps in self._status_entries:
@@ -1190,7 +1189,13 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             reel_ok = any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
             if audio.exists() and reel_ok:
                 continue
-            if f'{short}_{band}_REMASTER' in active_keys or perf in self._enqueued_keys:
+            # Ask the live queue, not a pre-loop snapshot: two status rows can
+            # normalise to the same perf, so the second must see the first's
+            # just-enqueued REMASTER (which a snapshot taken before the loop
+            # misses). _enqueued_keys still guards an in-flight full pipeline.
+            rk = f'{short}_{band}_REMASTER'
+            if any(qj.manifest_key == rk for qj in self._job_queue.all_active()) \
+                    or perf in self._enqueued_keys:
                 continue
             if self._remaster_status.get(perf) in ('mastering_error', 'no_zip', 'zip_empty'):
                 # A prior attempt this session failed terminally (no usable ZIP,
