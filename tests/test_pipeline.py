@@ -505,7 +505,7 @@ class TestFinishIncompleteShows:
         # and piled up duplicate REMASTER+REEL jobs for shows that could never
         # complete (no usable ZIP / mastering crash), draining in a burst.
         date = self._recent_date()
-        for status in ('mastering_error', 'no_zip', 'zip_empty'):
+        for status in ('mastering_error', 'no_zip', 'zip_empty', 'no_audio'):
             fp = self._make(tmp_path)
             fp._status_entries = [((date, 'Flatwounds'), self._ps(date, 'Flatwounds'))]
             fp._remaster_status = {f'{date}_Flatwounds': status}
