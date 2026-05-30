@@ -995,7 +995,32 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         zip_path = ps.zip_files[0]
-        base     = zip_path.stem.replace('_MULTITRACK', '')   # e.g. 26-04-11_ALTAR
+        if not zip_path.exists():
+            # The stored path (from the encoding DB) can be stale: missing the
+            # _MULTITRACK suffix, or carrying space/underscore drift between the
+            # band name and the on-disk filename. Resolve the real ZIP by
+            # matching the canonical perf key against normalised candidate stems.
+            def _norm(stem: str) -> str:
+                return stem.replace(' ', '_').replace('_MULTITRACK', '')
+            cands = sorted(
+                (z for z in self.audio_dest.glob(f'{short_date}_*.zip')
+                 if _norm(z.stem) == perf_key),
+                key=lambda z: '_MULTITRACK' not in z.stem,  # prefer multitrack ZIP
+            )
+            if not cands:
+                self.logger.warning(
+                    f"REMASTER  ZIP path stale, no on-disk match for {perf_key}: {zip_path.name}"
+                )
+                self._remaster_status[perf_key] = 'no_zip'
+                self._clear_op('remaster')
+                return
+            self.logger.info(f"REMASTER  resolved stale ZIP path → {cands[0].name}")
+            zip_path = cands[0]
+        # Derive the master basename from the canonical perf key (YY-MM-DD_Band,
+        # underscores), NOT the ZIP filename — ZIP stems carry _MULTITRACK and can
+        # contain spaces (e.g. "26-05-13_Mall Goth_MULTITRACK.zip"), which would
+        # name the master differently from what REEL/existing_fullset look up.
+        base     = perf_key   # e.g. 26-04-11_ALTAR
 
         self.logger.info(f"REMASTER  {base}")
         self._set_op('remaster', f'REMASTER  {base}')
@@ -1138,6 +1163,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         encode/audio jobs. Master/reel presence is read from disk because the
         encoding DB intentionally does not track those output types.
         """
+        # Rebuild from the encoding DB ourselves — don't depend on the STATUS
+        # menu having been opened. Otherwise _status_entries stays empty on a
+        # fresh engine and this reconciler silently no-ops forever.
+        self._rebuild_status_entries()
         if not self._status_entries:
             return
         active_keys = {qj.manifest_key for qj in self._job_queue.all_active()}
@@ -1162,6 +1191,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             if audio.exists() and reel_ok:
                 continue
             if f'{short}_{band}_REMASTER' in active_keys or perf in self._enqueued_keys:
+                continue
+            if self._remaster_status.get(perf) in ('mastering_error', 'no_zip', 'zip_empty'):
+                # A prior attempt this session failed terminally (no usable ZIP,
+                # or mastering crashed) — re-queuing hourly just spams the queue
+                # and log. Cleared on restart, so a genuine retry needs a bounce.
                 continue
             miss = ' '.join(filter(None, [
                 '' if audio.exists() else 'AUDIO',

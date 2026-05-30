@@ -287,6 +287,56 @@ class TestRemasterStatusTracker:
         fp._do_remaster_for_band('2026-05-28', ps)
         assert fp._remaster_status.get('26-05-28_Jermey_Gold') == 'ok'
 
+    def test_zip_with_space_uses_canonical_underscore_base(self, tmp_path: pathlib.Path) -> None:
+        # Regression: ZIPs can be named with a space ("26-05-13_Mall Goth_MULTITRACK.zip"),
+        # but the canonical perf key (ps.band) uses underscores. base must follow the
+        # perf key so the master is named "26-05-13_Mall_Goth_AUDIO.mp3" — the name REEL
+        # and existing_fullset look up. (Deriving base from the ZIP stem produced a
+        # space-named master and REEL skipped: "AUDIO not found".)
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-13', band='Mall_Goth')
+        zip_path = tmp_path / 'audio' / '26-05-13_Mall Goth_MULTITRACK.zip'   # space!
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.touch()
+        ps.zip_files = [zip_path]
+        # Canonical underscore name present → existing_fullset path taken (no numpy).
+        # If base were derived from the space-named ZIP, this lookup would miss and the
+        # empty .touch()'d ZIP would fail extraction → status 'mastering_error'.
+        (fp.audio_dest / '26-05-13_Mall_Goth_AUDIO.mp3').touch()
+        fp._do_remaster_for_band('2026-05-13', ps)
+        assert fp._remaster_status.get('26-05-13_Mall_Goth') == 'ok'
+
+    def test_stale_zip_path_no_match_marks_no_zip(self, tmp_path: pathlib.Path) -> None:
+        # Regression (Bug C): the encoding-DB path can be stale — e.g. it lost
+        # the _MULTITRACK suffix ("26-05-04_FORCE_RAVE.zip") so the file does not
+        # exist. With no real ZIP matching the perf key on disk, mark no_zip
+        # rather than crashing with FileNotFoundError opening the dead path.
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-04', band='FORCE_RAVE')
+        ps.zip_files = [fp.audio_dest / '26-05-04_FORCE_RAVE.zip']  # stale, doesn't exist
+        fp._do_remaster_for_band('2026-05-04', ps)
+        assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'no_zip'
+
+    def test_stale_zip_path_resolves_real_multitrack(
+        self, tmp_path: pathlib.Path, caplog: Any
+    ) -> None:
+        # Regression (Bug C): stored path is stale, but the real
+        # <perf>_MULTITRACK.zip is on disk — resolve to it instead of the dead
+        # path. (Canonical AUDIO present so existing_fullset is taken, avoiding
+        # the numpy/scipy mastering dependency; the resolve log proves the fix.)
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-04', band='FORCE_RAVE')
+        ps.zip_files = [fp.audio_dest / '26-05-04_FORCE_RAVE.zip']         # stale path
+        (fp.audio_dest / '26-05-04_FORCE_RAVE_MULTITRACK.zip').touch()     # real file present
+        (fp.audio_dest / '26-05-04_FORCE_RAVE_AUDIO.mp3').touch()          # existing_fullset → ok
+        with caplog.at_level(logging.INFO, logger='test_remaster'):
+            fp._do_remaster_for_band('2026-05-04', ps)
+        assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'ok'
+        assert any('resolved stale ZIP path' in r.message for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — _finish_incomplete_shows reconciler (no ffmpeg required)
@@ -311,8 +361,13 @@ class _FakePipelineFinish:
         self.logger          = logging.getLogger('test_finish')
         self._status_entries: list = []
         self._enqueued_keys: set   = set()
+        self._remaster_status: dict = {}
         self._job_queue            = _FakeQueue(active_keys)
         self.remaster_calls: list  = []
+
+    def _rebuild_status_entries(self) -> bool:
+        # No-op for unit tests: _status_entries is set directly by each test.
+        return bool(self._status_entries)
 
     def _enqueue_remaster(self, date: str, band: str | None = None,
                           reel_overwrite: bool = True, **_: Any) -> None:
@@ -409,3 +464,16 @@ class TestFinishIncompleteShows:
         fp2._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
         fp2._finish_incomplete_shows()
         assert fp2.remaster_calls == []
+
+    def test_terminal_remaster_failure_not_requeued(self, tmp_path):
+        # Regression (Bug B): a show whose REMASTER failed terminally this
+        # session must not be re-queued every hour. The reconciler ran hourly
+        # and piled up duplicate REMASTER+REEL jobs for shows that could never
+        # complete (no usable ZIP / mastering crash), draining in a burst.
+        date = self._recent_date()
+        for status in ('mastering_error', 'no_zip', 'zip_empty'):
+            fp = self._make(tmp_path)
+            fp._status_entries = [((date, 'Flatwounds'), self._ps(date, 'Flatwounds'))]
+            fp._remaster_status = {f'{date}_Flatwounds': status}
+            fp._finish_incomplete_shows()
+            assert fp.remaster_calls == [], f'should skip after {status}'
