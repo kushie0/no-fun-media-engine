@@ -231,6 +231,8 @@ class _FakePipelineRemaster:
     def _set_op(self, key: str, text: str) -> None: ...
     def _clear_op(self, key: str) -> None: ...
     def _find_date_folder(self, *a: Any) -> None: return None
+    def _show_status_list(self) -> None: ...
+    _active_menu: Any = None
 
 
 class TestRemasterStatusTracker:
@@ -267,3 +269,260 @@ class TestRemasterStatusTracker:
             fp._do_reel_for_perf('26-05-13_Mystery')
         warns = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any('REMASTER status: unknown' in m for m in warns)
+
+    def test_multitrack_zip_base_strips_suffix(self, tmp_path: pathlib.Path) -> None:
+        # Regression: real ZIPs are named <perf>_MULTITRACK.zip; base must not
+        # carry _MULTITRACK into the output filename so REEL can find _AUDIO.mp3.
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-28', band='Jermey_Gold')
+        zip_path = tmp_path / 'audio' / '26-05-28_Jermey_Gold_MULTITRACK.zip'
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.touch()
+        ps.zip_files = [zip_path]
+        # Pre-create the canonical audio file so the existing_fullset path is taken
+        # (avoids numpy/scipy dependency while still exercising the base derivation).
+        canonical = fp.audio_dest / '26-05-28_Jermey_Gold_AUDIO.mp3'
+        canonical.touch()
+        fp._do_remaster_for_band('2026-05-28', ps)
+        assert fp._remaster_status.get('26-05-28_Jermey_Gold') == 'ok'
+
+    def test_zip_with_space_uses_canonical_underscore_base(self, tmp_path: pathlib.Path) -> None:
+        # Regression: ZIPs can be named with a space ("26-05-13_Mall Goth_MULTITRACK.zip"),
+        # but the canonical perf key (ps.band) uses underscores. base must follow the
+        # perf key so the master is named "26-05-13_Mall_Goth_AUDIO.mp3" — the name REEL
+        # and existing_fullset look up. (Deriving base from the ZIP stem produced a
+        # space-named master and REEL skipped: "AUDIO not found".)
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-13', band='Mall_Goth')
+        zip_path = tmp_path / 'audio' / '26-05-13_Mall Goth_MULTITRACK.zip'   # space!
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.touch()
+        ps.zip_files = [zip_path]
+        # Canonical underscore name present → existing_fullset path taken (no numpy).
+        # If base were derived from the space-named ZIP, this lookup would miss and the
+        # empty .touch()'d ZIP would fail extraction → status 'mastering_error'.
+        (fp.audio_dest / '26-05-13_Mall_Goth_AUDIO.mp3').touch()
+        fp._do_remaster_for_band('2026-05-13', ps)
+        assert fp._remaster_status.get('26-05-13_Mall_Goth') == 'ok'
+
+    def test_stale_zip_path_no_match_marks_no_zip(self, tmp_path: pathlib.Path) -> None:
+        # Regression (Bug C): the encoding-DB path can be stale — e.g. it lost
+        # the _MULTITRACK suffix ("26-05-04_FORCE_RAVE.zip") so the file does not
+        # exist. With no real ZIP matching the perf key on disk, mark no_zip
+        # rather than crashing with FileNotFoundError opening the dead path.
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-04', band='FORCE_RAVE')
+        ps.zip_files = [fp.audio_dest / '26-05-04_FORCE_RAVE.zip']  # stale, doesn't exist
+        fp._do_remaster_for_band('2026-05-04', ps)
+        assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'no_zip'
+
+    def test_stale_zip_path_resolves_real_multitrack(
+        self, tmp_path: pathlib.Path, caplog: Any
+    ) -> None:
+        # Regression (Bug C): stored path is stale, but the real
+        # <perf>_MULTITRACK.zip is on disk — resolve to it instead of the dead
+        # path. (Canonical AUDIO present so existing_fullset is taken, avoiding
+        # the numpy/scipy mastering dependency; the resolve log proves the fix.)
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-04', band='FORCE_RAVE')
+        ps.zip_files = [fp.audio_dest / '26-05-04_FORCE_RAVE.zip']         # stale path
+        (fp.audio_dest / '26-05-04_FORCE_RAVE_MULTITRACK.zip').touch()     # real file present
+        (fp.audio_dest / '26-05-04_FORCE_RAVE_AUDIO.mp3').touch()          # existing_fullset → ok
+        with caplog.at_level(logging.INFO, logger='test_remaster'):
+            fp._do_remaster_for_band('2026-05-04', ps)
+        assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'ok'
+        assert any('resolved stale ZIP path' in r.message for r in caplog.records)
+
+    def test_empty_masters_marks_no_audio(
+        self, tmp_path: pathlib.Path, monkeypatch: Any
+    ) -> None:
+        # Regression (Finding 2): when the source WAVs are missing/unusable,
+        # generate_masters returns [] and writes no file. The remaster must mark
+        # 'no_audio' (terminal) instead of 'ok' — otherwise the REEL skips and the
+        # hourly reconciler re-queues the show forever.
+        # Stub mastering/reel in sys.modules so the run needs no numpy/scipy.
+        import sys, types
+        from nofun.inventory import PerformanceState
+        fake_mastering = types.ModuleType('nofun.mastering')
+        fake_mastering.generate_masters = lambda *a, **k: []   # wrote nothing
+        fake_mastering._ott_plugin_cache = object()            # not None → skip reset
+        fake_reel = types.ModuleType('nofun.reel')
+        fake_reel.generate_reel = lambda *a, **k: None
+        monkeypatch.setitem(sys.modules, 'nofun.mastering', fake_mastering)
+        monkeypatch.setitem(sys.modules, 'nofun.reel', fake_reel)
+
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-25', band='Flatwounds')
+        zip_path = fp.audio_dest / '26-05-25_Flatwounds_MULTITRACK.zip'
+        with zf.ZipFile(zip_path, 'w') as z:
+            z.writestr('ch1.wav', b'RIFF')   # non-empty so wav_files isn't empty
+        ps.zip_files = [zip_path]
+        fp._do_remaster_for_band('2026-05-25', ps)
+        assert fp._remaster_status.get('26-05-25_Flatwounds') == 'no_audio'
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _finish_incomplete_shows reconciler (no ffmpeg required)
+# ---------------------------------------------------------------------------
+
+class _FakeQueue:
+    def __init__(self, active_keys: list[str] | None = None) -> None:
+        self._active: list = [type('J', (), {'manifest_key': k})() for k in (active_keys or [])]
+
+    def all_active(self) -> list:
+        return self._active
+
+    def add(self, manifest_key: str) -> None:
+        self._active.append(type('J', (), {'manifest_key': manifest_key})())
+
+
+class _FakePipelineFinish:
+    """Minimal Pipeline stand-in for _finish_incomplete_shows (no ffmpeg/DB)."""
+
+    def __init__(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None) -> None:
+        self.audio_dest = tmp_path / 'audio'
+        self.vids_dest  = tmp_path / 'videos'
+        for d in (self.audio_dest, self.vids_dest):
+            d.mkdir(parents=True, exist_ok=True)
+        self.logger          = logging.getLogger('test_finish')
+        self._status_entries: list = []
+        self._enqueued_keys: set   = set()
+        self._remaster_status: dict = {}
+        self._job_queue            = _FakeQueue(active_keys)
+        self.remaster_calls: list  = []
+
+    def _rebuild_status_entries(self) -> bool:
+        # No-op for unit tests: _status_entries is set directly by each test.
+        return bool(self._status_entries)
+
+    def _enqueue_remaster(self, date: str, band: str | None = None,
+                          reel_overwrite: bool = True, **_: Any) -> None:
+        self.remaster_calls.append((date, band, reel_overwrite))
+        # Mirror the real _job_queue.enqueue: the REMASTER manifest becomes
+        # live immediately, so a later iteration sees it via all_active().
+        short = date[2:] if date.startswith('20') else date
+        self._job_queue.add(f'{short}_{band}_REMASTER' if band else f'{short}_REMASTER')
+
+
+class TestFinishIncompleteShows:
+    def _make(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None):
+        from media_engine import Pipeline
+        fp = _FakePipelineFinish(tmp_path, active_keys)
+        fp._finish_incomplete_shows = Pipeline._finish_incomplete_shows.__get__(fp)
+        return fp
+
+    @staticmethod
+    def _recent_date(days_ago: int = 1) -> str:
+        import datetime
+        return f'{datetime.date.today() - datetime.timedelta(days=days_ago):%y-%m-%d}'
+
+    @staticmethod
+    def _ps(date: str, band: str):
+        from nofun.inventory import PerformanceState
+        ps = PerformanceState(date=date, band=band)
+        ps.zip_files  = [pathlib.Path(f'{date}_{band}_MULTITRACK.zip')]
+        ps.quad_files = [pathlib.Path(f'{date}_{band}_CAM{n}.mp4') for n in (1, 2, 3, 4)]
+        return ps
+
+    def test_missing_both_enqueues_with_overwrite_false(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == [(date, 'Jermey_Gold', False)]
+
+    def test_already_finished_skipped(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        perf = f'{date}_Jermey_Gold'
+        (fp.audio_dest / f'{perf}_AUDIO.mp3').write_bytes(b'x')
+        (fp.vids_dest / f'{perf}.0_INSTAGRAM.mp4').write_bytes(b'x')
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_missing_reel_only_enqueues(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        perf = f'{date}_Jermey_Gold'
+        (fp.audio_dest / f'{perf}_AUDIO.mp3').write_bytes(b'x')  # master present, reel absent
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == [(date, 'Jermey_Gold', False)]
+
+    def test_nofun_band_skipped(self, tmp_path):
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'NOFUN'), self._ps(date, 'NOFUN'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_too_old_skipped(self, tmp_path):
+        date = self._recent_date(days_ago=40)
+        fp = self._make(tmp_path)
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_no_zip_or_few_quads_skipped(self, tmp_path):
+        from nofun.inventory import PerformanceState
+        date = self._recent_date()
+        fp = self._make(tmp_path)
+        no_zip = PerformanceState(date=date, band='Jermey_Gold')
+        no_zip.zip_files  = []
+        no_zip.quad_files = [pathlib.Path('a'), pathlib.Path('b'), pathlib.Path('c'), pathlib.Path('d')]
+        few_quads = self._ps(date, 'Other')
+        few_quads.quad_files = few_quads.quad_files[:2]
+        fp._status_entries = [
+            ((date, 'Jermey_Gold'), no_zip),
+            ((date, 'Other'), few_quads),
+        ]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+    def test_already_in_flight_skipped(self, tmp_path):
+        date = self._recent_date()
+        # active REMASTER manifest for this perf
+        fp = self._make(tmp_path, active_keys=[f'{date}_Jermey_Gold_REMASTER'])
+        fp._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp._finish_incomplete_shows()
+        assert fp.remaster_calls == []
+
+        # main manifest still enqueued
+        fp2 = self._make(tmp_path)
+        fp2._enqueued_keys = {f'{date}_Jermey_Gold'}
+        fp2._status_entries = [((date, 'Jermey_Gold'), self._ps(date, 'Jermey_Gold'))]
+        fp2._finish_incomplete_shows()
+        assert fp2.remaster_calls == []
+
+    def test_terminal_remaster_failure_not_requeued(self, tmp_path):
+        # Regression (Bug B): a show whose REMASTER failed terminally this
+        # session must not be re-queued every hour. The reconciler ran hourly
+        # and piled up duplicate REMASTER+REEL jobs for shows that could never
+        # complete (no usable ZIP / mastering crash), draining in a burst.
+        date = self._recent_date()
+        for status in ('mastering_error', 'no_zip', 'zip_empty', 'no_audio'):
+            fp = self._make(tmp_path)
+            fp._status_entries = [((date, 'Flatwounds'), self._ps(date, 'Flatwounds'))]
+            fp._remaster_status = {f'{date}_Flatwounds': status}
+            fp._finish_incomplete_shows()
+            assert fp.remaster_calls == [], f'should skip after {status}'
+
+    def test_duplicate_status_rows_enqueue_once(self, tmp_path):
+        # Regression (Bug B, in-loop): two _status_entries rows that normalise
+        # to the same perf (here a 4-digit vs 2-digit year for one show) must
+        # enqueue exactly one REMASTER. A pre-loop active_keys snapshot missed
+        # the first row's just-enqueued job, so both rows queued.
+        short = self._recent_date()           # YY-MM-DD
+        long  = f'20{short}'                  # YYYY-MM-DD, same show
+        fp = self._make(tmp_path)
+        fp._status_entries = [
+            ((long,  'Jermey_Gold'), self._ps(long,  'Jermey_Gold')),
+            ((short, 'Jermey_Gold'), self._ps(short, 'Jermey_Gold')),
+        ]
+        fp._finish_incomplete_shows()
+        assert len(fp.remaster_calls) == 1, fp.remaster_calls

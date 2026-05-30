@@ -250,15 +250,31 @@ _APPROX_STEREO_FILTER = (
 
 
 def _ffmpeg_pipe(raw_in: bytes, sr: int, in_ch: int, filter_str: str, out_ch: int) -> bytes:
-    """Pipe raw f32le bytes through an ffmpeg filter graph. Returns raw f32le bytes."""
-    cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error',
-        '-f', 'f32le', '-ar', str(sr), '-ac', str(in_ch), '-i', 'pipe:0',
-        '-filter_complex', filter_str,
-        '-f', 'f32le', '-ar', str(sr), '-ac', str(out_ch), 'pipe:1',
-    ]
-    result = subprocess.run(cmd, input=raw_in, capture_output=True)
-    return result.stdout
+    """Run raw f32le bytes through an ffmpeg filter graph via temp files. Returns raw f32le bytes.
+
+    Temp files instead of pipes: Windows pipe buffers (64 KB) make piping 1+ GB of audio
+    take hours; disk I/O at 500+ MB/s takes seconds.
+    """
+    import tempfile as _tf, os as _os
+    fd_in,  path_in  = _tf.mkstemp(suffix='.f32le')
+    fd_out, path_out = _tf.mkstemp(suffix='.f32le')
+    try:
+        _os.write(fd_in, raw_in); _os.close(fd_in); _os.close(fd_out)
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error',
+            '-f', 'f32le', '-ar', str(sr), '-ac', str(in_ch), '-i', path_in,
+            '-filter_complex', filter_str,
+            '-f', 'f32le', '-ar', str(sr), '-ac', str(out_ch), '-y', path_out,
+        ]
+        subprocess.run(cmd, check=True)
+        with open(path_out, 'rb') as f:
+            return f.read()
+    finally:
+        for p in (path_in, path_out):
+            try:
+                _os.unlink(p)
+            except OSError:
+                pass
 
 
 def _denoise_mono(mono: np.ndarray, sr: int, nr: float = 10.0, nf: float = -50.0) -> np.ndarray:

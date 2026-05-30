@@ -648,12 +648,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             try:
                 y, mo, d = date_str.split('-')
-                rec_date = datetime.date(int(y), int(mo), int(d))
+                rec_date = datetime.date(2000 + int(y), int(mo), int(d))
             except (ValueError, AttributeError):
                 continue
             if (datetime.date.today() - rec_date).days >= EXPIRE_AGE:
                 continue
-            date_prefix = rec_date.strftime('%y-%m-%d')
+            date_prefix = date_str
             eligible.append((date_prefix, date_str, band, rec_date, ul_file))
 
         # Cloud filenames each date folder should eventually hold (all bands).
@@ -801,13 +801,13 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         try:
-            parts    = date_str.split('-')
-            rec_date = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+            parts = date_str.split('-')
+            datetime.date(2000 + int(parts[0]), int(parts[1]), int(parts[2]))  # validate
         except (ValueError, IndexError):
             self.logger.info(f"REUPLOAD: could not parse date {date_str!r}")
             return
 
-        date_prefix = rec_date.strftime('%y-%m-%d')
+        date_prefix = date_str
 
         dest = self._find_date_folder(self.sharepoint_dest, date_prefix)
 
@@ -995,7 +995,32 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         zip_path = ps.zip_files[0]
-        base     = zip_path.stem   # e.g. 26-04-11_ALTAR
+        if not zip_path.exists():
+            # The stored path (from the encoding DB) can be stale: missing the
+            # _MULTITRACK suffix, or carrying space/underscore drift between the
+            # band name and the on-disk filename. Resolve the real ZIP by
+            # matching the canonical perf key against normalised candidate stems.
+            def _norm(stem: str) -> str:
+                return stem.replace(' ', '_').replace('_MULTITRACK', '')
+            cands = sorted(
+                (z for z in self.audio_dest.glob(f'{short_date}_*.zip')
+                 if _norm(z.stem) == perf_key),
+                key=lambda z: '_MULTITRACK' not in z.stem,  # prefer multitrack ZIP
+            )
+            if not cands:
+                self.logger.warning(
+                    f"REMASTER  ZIP path stale, no on-disk match for {perf_key}: {zip_path.name}"
+                )
+                self._remaster_status[perf_key] = 'no_zip'
+                self._clear_op('remaster')
+                return
+            self.logger.info(f"REMASTER  resolved stale ZIP path → {cands[0].name}")
+            zip_path = cands[0]
+        # Derive the master basename from the canonical perf key (YY-MM-DD_Band,
+        # underscores), NOT the ZIP filename — ZIP stems carry _MULTITRACK and can
+        # contain spaces (e.g. "26-05-13_Mall Goth_MULTITRACK.zip"), which would
+        # name the master differently from what REEL/existing_fullset look up.
+        base     = perf_key   # e.g. 26-04-11_ALTAR
 
         self.logger.info(f"REMASTER  {base}")
         self._set_op('remaster', f'REMASTER  {base}')
@@ -1033,23 +1058,38 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self._clear_op('remaster')
                 return
 
+        # Mastering can return cleanly having written nothing — e.g. the ZIP's
+        # WAVs were all silent/missing so every channel combo was skipped. Treat
+        # "no audio file on disk" as terminal, not success: otherwise the show
+        # records 'ok', its REEL skips with "AUDIO not found", and the hourly
+        # reconciler re-queues it forever. Cleared on restart, so a genuine
+        # retry (once the WAVs exist) needs an engine bounce.
+        results = [p for p in results if p.exists() and p.stat().st_size > 0]
+        if not results:
+            self.logger.warning(
+                f"REMASTER  {base}  no audio master produced "
+                f"(missing or unusable source WAVs in {zip_path.name})"
+            )
+            self._remaster_status[perf_key] = 'no_audio'
+            self._clear_op('remaster')
+            return
+
         # Copy AUDIO to SharePoint date folder
         if self.sharepoint_dest and self.sharepoint_dest.is_dir():
             from nofun.inventory import extract_date_band as _edb
             for wav_path in results:
                 wav_date, _ = _edb(wav_path.stem)
                 if wav_date != 'TBD':
-                    try:
-                        parts = wav_date.split('-')
-                        wav_prefix = f"{parts[0][2:]}-{parts[1]}-{parts[2]}"
-                    except (IndexError, ValueError):
-                        wav_prefix = wav_date
+                    wav_prefix = wav_date   # already YY-MM-DD
                     sp_wav = (
                         self._find_date_folder(self.sharepoint_dest, wav_prefix)
                         or self.sharepoint_dest / wav_prefix
                     )
                     sp_wav.mkdir(exist_ok=True)
-                    sp_dst = sp_wav / cloud_filename(wav_path.name)
+                    # strip _MULTITRACK so the remaster overwrites the original
+                    # <BAND>_AUDIO.mp3 instead of landing beside it
+                    cloud_name = cloud_filename(wav_path.name).replace('_MULTITRACK', '')
+                    sp_dst = sp_wav / cloud_name
                     shutil.copy(wav_path, sp_dst)
                     self.logger.info(f"SHARE   {wav_path.name} → {sp_wav.name}")
                     dehydrate_cloud_files([sp_dst], self.logger)
@@ -1068,7 +1108,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 pass
 
     def _enqueue_remaster(self, date_str: str, trial_seconds: int = 0, force: bool = False,
-                          band: str | None = None) -> None:
+                          band: str | None = None, reel_overwrite: bool = True) -> None:
         """Enqueue one REMASTER + REEL job pair per band for *date_str*.
 
         Each band gets a REMASTER (MANUAL) job followed by a REEL (GPU_BOUND)
@@ -1113,7 +1153,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 depends=[master_job.job_id],
             )
             jobs.append(reel_job)
-            python_fns[reel_job.job_id] = lambda p=perf: self._do_reel_for_perf(p, overwrite=True)
+            python_fns[reel_job.job_id] = lambda p=perf, _o=reel_overwrite: self._do_reel_for_perf(p, overwrite=_o)
             cat_map[reel_job.job_id] = JobCategory.MANUAL  # user-initiated, no time gate
 
         perf_key = f"{short}_{band}_REMASTER" if band else f"{short}_REMASTER"
@@ -1128,6 +1168,65 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 f"REMASTER  queued {len(bands)} band(s)"
                 " — type REMASTER again to restart from scratch"
             )
+
+    def _finish_incomplete_shows(self) -> None:
+        """Reconciler: queue REMASTER+REEL for recent shows that have local quads
+        + ZIP but are missing the AUDIO master or INSTAGRAM reel on disk.
+
+        Recovers shows interrupted after quads+ZIP but before master/reel (e.g. an
+        engine restart) — the watchdog never re-detects them once raw sources are
+        swept, and the per-perf manifest gates master/reel behind fresh
+        encode/audio jobs. Master/reel presence is read from disk because the
+        encoding DB intentionally does not track those output types.
+        """
+        # Rebuild from the encoding DB ourselves — don't depend on the STATUS
+        # menu having been opened. Otherwise _status_entries stays empty on a
+        # fresh engine and this reconciler silently no-ops forever.
+        self._rebuild_status_entries()
+        if not self._status_entries:
+            return
+        today  = datetime.date.today()
+        queued = 0
+        for (date, band), ps in self._status_entries:
+            if band in ('NOFUN', 'TBD', ''):
+                continue
+            if not (ps.zip_files and len(ps.quad_files) >= 4):
+                continue
+            short = date[2:] if date.startswith('20') else date  # normalise to YY-MM-DD
+            try:
+                y, mo, d = short.split('-')
+                rec_date = datetime.date(2000 + int(y), int(mo), int(d))
+            except (ValueError, AttributeError):
+                continue
+            if (today - rec_date).days > EXPIRE_AGE:
+                continue
+            perf    = f'{short}_{band}'
+            audio   = self.audio_dest / f'{perf}_AUDIO.mp3'
+            reel_ok = any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
+            if audio.exists() and reel_ok:
+                continue
+            # Ask the live queue, not a pre-loop snapshot: two status rows can
+            # normalise to the same perf, so the second must see the first's
+            # just-enqueued REMASTER (which a snapshot taken before the loop
+            # misses). _enqueued_keys still guards an in-flight full pipeline.
+            rk = f'{short}_{band}_REMASTER'
+            if any(qj.manifest_key == rk for qj in self._job_queue.all_active()) \
+                    or perf in self._enqueued_keys:
+                continue
+            if self._remaster_status.get(perf) in ('mastering_error', 'no_zip', 'zip_empty', 'no_audio'):
+                # A prior attempt this session failed terminally (no usable ZIP,
+                # or mastering crashed) — re-queuing hourly just spams the queue
+                # and log. Cleared on restart, so a genuine retry needs a bounce.
+                continue
+            miss = ' '.join(filter(None, [
+                '' if audio.exists() else 'AUDIO',
+                '' if reel_ok else 'REEL',
+            ]))
+            self.logger.info(f'FINISH  {perf} missing {miss} — queuing REMASTER+REEL')
+            self._enqueue_remaster(date, band=band, reel_overwrite=False)
+            queued += 1
+        if queued:
+            self.logger.info(f'FINISH  queued {queued} incomplete show(s)')
 
     # -----------------------------------------------------------------------
     # Trial summary
@@ -1567,11 +1666,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._show_groups = []
         for date in sorted(by_date.keys(), reverse=True):
             perf_list = by_date[date]
-            try:
-                parts = date.split('-')
-                date_prefix = f"{parts[0][2:]}-{parts[1]}-{parts[2]}"  # YYYY→YY
-            except (IndexError, ValueError):
-                date_prefix = date
+            date_prefix = date   # already YY-MM-DD
             # Build display name directly from band names — no SharePoint logic.
             # SP folder operations (REUPLOAD) do their own naming independently.
             bands = [ps.band for ps in perf_list
@@ -2138,7 +2233,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             try:
                 y, mo, d = date_str.split('-')
-                date_prefix = datetime.date(int(y), int(mo), int(d)).strftime('%y-%m-%d')
+                datetime.date(2000 + int(y), int(mo), int(d))   # validate
+                date_prefix = date_str
             except (ValueError, AttributeError):
                 continue
             if date_prefix not in new_by_date:
@@ -2179,7 +2275,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             # we expect (4 quads + audio ZIP per band) with a "processing…"
             # marker; SYNC overwrites this with the final form as files land.
             y, mo, d  = date_str.split('-')  # validated when new_by_date was built
-            rec_date  = datetime.date(int(y), int(mo), int(d))
+            rec_date  = datetime.date(2000 + int(y), int(mo), int(d))
             expected: set[str] = set()
             for mov in all_movs:
                 m_date, m_band = extract_date_band(mov.stem)
@@ -2948,6 +3044,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
           EXPIRE CLOUD SHARES — 3600s  (1 hr)
           EXPIRE RAW FILES    — 3600s  (1 hr)
           DEHYDRATE SWEEP     — 14400s (4 hr)
+          FINISH INCOMPLETE   — 3600s  (1 hr)
           AUTO SCAN           — 3600s  (1 hr)
           AUTO CLEANUP        — 21600s (6 hr) — multi-job manifest, deduped by manifest key
         """
@@ -2962,6 +3059,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             ('EXPIRE CLOUD SHARES', '_expire',       self._auto_expire_cloud_shares,   3600.0),
             ('EXPIRE RAW FILES',    '_expire_raw',   self._auto_expire_raw_files,      3600.0),
             ('DEHYDRATE SWEEP',     '_dehydrate',    self._dehydration_sweep,         14400.0),
+            ('FINISH INCOMPLETE',   '_finish',       self._finish_incomplete_shows,    3600.0),
         ]
         for label, kind, fn, interval in tasks:
             last = self._last_scheduled_enqueued.get(label, 0.0)
