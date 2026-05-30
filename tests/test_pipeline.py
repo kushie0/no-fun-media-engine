@@ -231,6 +231,8 @@ class _FakePipelineRemaster:
     def _set_op(self, key: str, text: str) -> None: ...
     def _clear_op(self, key: str) -> None: ...
     def _find_date_folder(self, *a: Any) -> None: return None
+    def _show_status_list(self) -> None: ...
+    _active_menu: Any = None
 
 
 class TestRemasterStatusTracker:
@@ -267,6 +269,23 @@ class TestRemasterStatusTracker:
             fp._do_reel_for_perf('26-05-13_Mystery')
         warns = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any('REMASTER status: unknown' in m for m in warns)
+
+    def test_multitrack_zip_base_strips_suffix(self, tmp_path: pathlib.Path) -> None:
+        # Regression: real ZIPs are named <perf>_MULTITRACK.zip; base must not
+        # carry _MULTITRACK into the output filename so REEL can find _AUDIO.mp3.
+        from nofun.inventory import PerformanceState
+        fp = self._make(tmp_path)
+        ps = PerformanceState(date='2026-05-28', band='Jermey_Gold')
+        zip_path = tmp_path / 'audio' / '26-05-28_Jermey_Gold_MULTITRACK.zip'
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.touch()
+        ps.zip_files = [zip_path]
+        # Pre-create the canonical audio file so the existing_fullset path is taken
+        # (avoids numpy/scipy dependency while still exercising the base derivation).
+        canonical = fp.audio_dest / '26-05-28_Jermey_Gold_AUDIO.mp3'
+        canonical.touch()
+        fp._do_remaster_for_band('2026-05-28', ps)
+        assert fp._remaster_status.get('26-05-28_Jermey_Gold') == 'ok'
 
 
 # ---------------------------------------------------------------------------

@@ -995,7 +995,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         zip_path = ps.zip_files[0]
-        base     = zip_path.stem   # e.g. 26-04-11_ALTAR
+        base     = zip_path.stem.replace('_MULTITRACK', '')   # e.g. 26-04-11_ALTAR
 
         self.logger.info(f"REMASTER  {base}")
         self._set_op('remaster', f'REMASTER  {base}')
