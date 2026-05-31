@@ -4,6 +4,8 @@ __all__ = [
     'scan_files',
     'extract_date_band',
     'extract_date_band_from_path',
+    'short_date',
+    'perf_key',
     'classify_file',
     'classify_location',
     'build_performance_states',
@@ -153,6 +155,18 @@ def extract_date_band_from_path(path: pathlib.Path) -> tuple[str, str]:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
         return f"{y:02d}-{mo:02d}-{d:02d}", _clean_band(path.stem)
     return 'TBD', 'TBD'
+
+
+def short_date(date: str) -> str:
+    """Normalise any parsed date to YY-MM-DD. extract_date_band already returns
+    this form; this only re-truncates a long YYYY-MM-DD that leaked in via the DB."""
+    return date[2:] if len(date) == 10 and date.startswith('20') else date
+
+
+def perf_key(date: str, band: str) -> str:
+    """Canonical performance identity: '<YY-MM-DD>_<band>'. The single source of
+    truth for the DB key, ZIP stem, reconciler key, and status map."""
+    return f'{short_date(date)}_{band}'
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +459,7 @@ def _render_state_dashboard(
 
         b = (ps.band[:24] + '..') if len(ps.band) > 26 else ps.band
         # Strip 4-digit year prefix for display: '2026-02-07' → '26-02-07'
-        d = ps.date[2:] if ps.date.startswith('20') else ps.date
+        d = short_date(ps.date)
 
         return (
             f"  {d:<12} {b:<28} {mov:>3} {quad:>3} {clips:>5} {mp3:>3} {reel:>4} "

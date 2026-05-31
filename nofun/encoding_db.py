@@ -25,9 +25,12 @@ import datetime
 import json
 import logging
 import pathlib
+import shutil
 import statistics
 import subprocess
 import threading
+
+from nofun.inventory import short_date
 
 _logger = logging.getLogger(__name__)
 
@@ -137,7 +140,7 @@ class EncodingDB:
 
     def __init__(self, path: pathlib.Path) -> None:
         self.path = path
-        self._data: dict = {'schema': 3, 'updated': '', 'performances': {}}
+        self._data: dict = {'schema': 4, 'updated': '', 'performances': {}}
         # Fast path-keyed index: _norm(path) -> record dict reference
         self._index: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -174,6 +177,15 @@ class EncodingDB:
             _logger.info(f"EncodingDB: schema 2 → 3 (normalized {n} band keys with spaces)")
             if n:
                 self.save()
+        if schema < 4:
+            try:
+                shutil.copy2(self.path, self.path.with_suffix('.pre-v4.bak'))
+            except OSError:
+                pass
+            n = self.migrate_normalize_date_keys()
+            self._data['schema'] = 4
+            if n:
+                self.save()
         self._rebuild_index()
 
     def save(self) -> None:
@@ -186,6 +198,7 @@ class EncodingDB:
 
     def upsert(self, date: str, band: str, category: str, record: dict) -> None:
         """Add or replace a record. Keyed by ``record['path']`` within the category."""
+        date = short_date(date)
         perfs = self._data.setdefault('performances', {})
         perf  = perfs.setdefault(date, {}).setdefault(band, {})
         entries: list[dict] = perf.setdefault(category, [])
@@ -201,7 +214,7 @@ class EncodingDB:
 
     def get_performance(self, date: str, band: str) -> dict | None:
         """Return the perf dict for (date, band), or None."""
-        return self._data.get('performances', {}).get(date, {}).get(band)
+        return self._data.get('performances', {}).get(short_date(date), {}).get(band)
 
     def lookup(self, path: pathlib.Path) -> dict | None:
         """Find a record by file path. O(1) via the in-memory index."""
@@ -226,6 +239,7 @@ class EncodingDB:
 
     def set_clips_summary(self, date: str, band: str, summary: dict) -> None:
         """Set the clips_summary dict for (date, band). Replaces existing summary."""
+        date = short_date(date)
         perfs = self._data.setdefault('performances', {})
         perf  = perfs.setdefault(date, {}).setdefault(band, {})
         perf['clips_summary'] = summary
@@ -236,6 +250,7 @@ class EncodingDB:
         Stored as a sibling key to quadrant_video / clips_summary / zipped_audio.
         Idempotent — last write wins.
         """
+        date = short_date(date)
         perfs = self._data.setdefault('performances', {})
         perf  = perfs.setdefault(date, {}).setdefault(band, {})
         perf['runtime_seconds'] = round(float(seconds), 1)
@@ -255,7 +270,7 @@ class EncodingDB:
     def get_clips_summary(self, date: str, band: str) -> dict | None:
         """Return clips_summary for (date, band), or None."""
         return (self._data.get('performances', {})
-                .get(date, {}).get(band, {})
+                .get(short_date(date), {}).get(band, {})
                 .get('clips_summary'))
 
     def migrate_clips_to_summary(self) -> int:
@@ -325,6 +340,46 @@ class EncodingDB:
             self._rebuild_index()
         return migrated
 
+    def migrate_normalize_date_keys(self) -> int:
+        """Re-key any YYYY-MM-DD performance date to YY-MM-DD. Idempotent.
+
+        - long-only key  -> rename in place (preserve the show; REBUILD can no
+          longer reconstruct fully archived/expired shows from disk).
+        - long+short twin-> short holds current-disk truth; for a band only the
+          long key has, move it wholesale; for a shared band, carry over only
+          runtime_seconds when short lacks it (the one scalar not rebuildable
+          from disk). Never union the long key's stale file records. Then drop
+          the long key.
+
+        Returns the count of long date keys normalised.
+        """
+        perfs = self._data.get('performances', {})
+        long_keys = [k for k in list(perfs) if len(k) == 10 and k.startswith('20')]
+        renamed = merged = 0
+        for long_key in long_keys:
+            short_key = long_key[2:]
+            long_bands = perfs.pop(long_key)
+            if short_key not in perfs:
+                perfs[short_key] = long_bands
+                renamed += 1
+                continue
+            short_bands = perfs[short_key]
+            for band, long_perf in long_bands.items():
+                if band not in short_bands:
+                    short_bands[band] = long_perf
+                elif ('runtime_seconds' not in short_bands[band]
+                      and 'runtime_seconds' in long_perf):
+                    short_bands[band]['runtime_seconds'] = long_perf['runtime_seconds']
+            merged += 1
+        n = renamed + merged
+        if n:
+            self._rebuild_index()
+            _logger.info(
+                f"EncodingDB: schema 3 → 4, normalised {n} date keys "
+                f"({renamed} renamed, {merged} merged)"
+            )
+        return n
+
     def set_inventory_scanned(self) -> None:
         """Record when the last full inventory scan ran."""
         self._data['inventory_scanned'] = _now_iso()
@@ -360,6 +415,7 @@ class EncodingDB:
 
     def rename_band(self, date_str: str, old_band: str, new_band: str) -> None:
         """Move all records from (date_str, old_band) to new_band, rewriting paths."""
+        date_str = short_date(date_str)
         date_bands = self._data.get('performances', {}).get(date_str, {})
         if old_band not in date_bands:
             return

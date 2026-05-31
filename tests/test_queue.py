@@ -296,7 +296,7 @@ class TestBuildManifestIdempotency:
     def test_encode_skipped_when_quads_exist(self, pipeline):
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, [], [], [])
@@ -304,7 +304,7 @@ class TestBuildManifestIdempotency:
 
     def test_audio_skipped_when_zip_exists(self, pipeline):
         movs = self._mov(pipeline)
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
 
@@ -314,11 +314,11 @@ class TestBuildManifestIdempotency:
     def test_clips_skipped_when_clips_exist(self, pipeline):
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
         clips_dir = pipeline.clips_dest / base
         clips_dir.mkdir(parents=True)
-        (clips_dir / f'{base}_UL_1.mp4').write_bytes(b'')
+        (clips_dir / f'{base}_CAM1_1.mp4').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, [], [], [])
         assert 'export_clips' not in [j.kind for j in manifest.jobs]
@@ -326,12 +326,12 @@ class TestBuildManifestIdempotency:
     def test_remaster_skipped_when_fullset_exists(self, pipeline):
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}_FULLSET.mp3').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_AUDIO.mp3').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, ch, [], [])
         assert '_remaster' not in [j.kind for j in manifest.jobs]
@@ -339,13 +339,13 @@ class TestBuildManifestIdempotency:
     def test_reel_skipped_when_reel_exists(self, pipeline):
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}_FULLSET.mp3').write_bytes(b'')
-        (pipeline.vids_dest / '26-04-11_ALTAR_reel.mp4').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_AUDIO.mp3').write_bytes(b'')
+        (pipeline.vids_dest / '26-04-11_ALTAR_INSTAGRAM.mp4').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, ch, [], [])
         assert 'generate_reel' not in [j.kind for j in manifest.jobs]
@@ -355,8 +355,8 @@ class TestBuildManifestIdempotency:
         movs = self._mov(pipeline)
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}_FULLSET.mp3').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_AUDIO.mp3').write_bytes(b'')
         # quads intentionally absent
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, ch, [], [])
@@ -373,12 +373,12 @@ class TestBuildManifestIdempotency:
         """REEL runs immediately (no deps) when FULLSET and quads already exist but no reel."""
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}_FULLSET.mp3').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_AUDIO.mp3').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, ch, [], [])
         scripts = [j.kind for j in manifest.jobs]
@@ -393,14 +393,14 @@ class TestBuildManifestIdempotency:
         """A reel for a different band on the same date does not block this band's reel."""
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
         ch = [pipeline.search_dir / '26-04-11_ALTAR_ch01.wav']
         ch[0].write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}.zip').write_bytes(b'')
-        (pipeline.audio_dest / f'{self.PERF}_FULLSET.mp3').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_MULTITRACK.zip').write_bytes(b'')
+        (pipeline.audio_dest / f'{self.PERF}_AUDIO.mp3').write_bytes(b'')
         # A reel for a different band on the same date
-        (pipeline.vids_dest / '26-04-11_PRIZE_reel.mp4').write_bytes(b'')
+        (pipeline.vids_dest / '26-04-11_PRIZE_INSTAGRAM.mp4').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, ch, [], [])
         assert 'generate_reel' in [j.kind for j in manifest.jobs]
@@ -414,7 +414,7 @@ class TestBuildManifestIdempotency:
         pipeline.force = True
         movs = self._mov(pipeline)
         base = movs[0].stem
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
 
         manifest, _ = pipeline._build_full_manifest(self.PERF, movs, [], [], [])
@@ -451,7 +451,7 @@ class TestMultiPerformance:
 
         def make_encode_fn(base):
             def _fn():
-                for q in ('UL', 'UR', 'LL', 'LR'):
+                for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
                     (pipeline.vids_dest / f'{base}_{q}.mp4').write_bytes(b'')
                 results.append(base)
             return _fn
@@ -474,7 +474,7 @@ class TestMultiPerformance:
 
         assert set(results) == {'26-04-11_ALTAR', '26-04-11_PRIZE'}
         for band in ('ALTAR', 'PRIZE'):
-            for q in ('UL', 'UR', 'LL', 'LR'):
+            for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
                 assert (pipeline.vids_dest / f'26-04-11_{band}_{q}.mp4').exists()
 
 
@@ -492,7 +492,7 @@ class TestFullSyntheticRun:
             if job.script == 'encode_quads':
                 base     = job.args['base']
                 dest_dir = pathlib.Path(job.args['dest_dir'])
-                for q in ('UL', 'UR', 'LL', 'LR'):
+                for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
                     (dest_dir / f'{base}_{q}_temp.mp4').write_bytes(b'\x00')
                 return ScriptResult('encode_quads', 0, {}, '', 0.0)
 
@@ -527,7 +527,7 @@ class TestFullSyntheticRun:
         assert not t.is_alive(), 'pipeline.run() did not exit within 10s'
 
         base = '26-04-11_ALTAR'
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             assert (pipeline.vids_dest / f'{base}_{q}.mp4').exists(), (
                 f'Missing quad: {base}_{q}.mp4'
             )

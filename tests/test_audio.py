@@ -293,7 +293,7 @@ class TestProcessAudioDirWavs:
              patch.object(fa, '_active_seconds', return_value=300.0):
             fa._process_audio_dir_wavs(fa.search_dir / 'Audio')
 
-        expected_zip = fa.audio_dest / '26-03-11_DAISY_CHAIN.zip'
+        expected_zip = fa.audio_dest / '26-03-11_DAISY_CHAIN_MULTITRACK.zip'
         assert expected_zip.exists()
 
     def test_moves_wavs_to_archive_after_zip(self, tmp_path):
@@ -307,7 +307,7 @@ class TestProcessAudioDirWavs:
              patch.object(fa, '_active_seconds', return_value=300.0):
             fa._process_audio_dir_wavs(fa.search_dir / 'Audio')
 
-        expected_zip = fa.audio_dest / '26-03-11_DAISY_CHAIN.zip'
+        expected_zip = fa.audio_dest / '26-03-11_DAISY_CHAIN_MULTITRACK.zip'
         assert expected_zip.exists()
         assert not wav.exists(), "Original WAV should have been moved to audio_archive"
         assert (fa.audio_archive / wav.name).exists(), "WAV should be in audio_archive"
@@ -319,14 +319,14 @@ class TestProcessAudioDirWavs:
         self._make_wav(audio_dir, '26-3-11_DAISY_CHAIN_chan7.3.wav')
 
         # Pre-create the zip so it appears already done
-        (fa.audio_dest / '26-03-11_DAISY_CHAIN.zip').write_bytes(b'existing')
+        (fa.audio_dest / '26-03-11_DAISY_CHAIN_MULTITRACK.zip').write_bytes(b'existing')
 
         with patch('nofun.audio.probe_stream', return_value='1'), \
              patch.object(fa, '_active_seconds', return_value=300.0):
             fa._process_audio_dir_wavs(fa.search_dir / 'Audio')
 
         # Should not overwrite the existing zip
-        assert (fa.audio_dest / '26-03-11_DAISY_CHAIN.zip').read_bytes() == b'existing'
+        assert (fa.audio_dest / '26-03-11_DAISY_CHAIN_MULTITRACK.zip').read_bytes() == b'existing'
 
     def test_zips_chan_wavs_directly_in_search_dir(self, tmp_path):
         """Chan-style single-channel WAVs in search_dir (not Audio/) are zipped."""
@@ -338,7 +338,7 @@ class TestProcessAudioDirWavs:
              patch.object(fa, '_active_seconds', return_value=300.0):
             fa._process_audio_dir_wavs(fa.search_dir)
 
-        assert (fa.audio_dest / '26-03-11_DAISY_CHAIN.zip').exists()
+        assert (fa.audio_dest / '26-03-11_DAISY_CHAIN_MULTITRACK.zip').exists()
 
     def test_excludes_split_ch_wavs_when_scanning_search_dir(self, tmp_path):
         """_ch??.wav files in search_dir are excluded (handled by _export_audio_zips)."""
@@ -418,12 +418,12 @@ class TestZipWavGroup:
             trim_dir=tmp_path,
             on_success_real_drive='delete',
         )
-        assert (fa.audio_dest / '26-01-01_Band.zip').exists()
+        assert (fa.audio_dest / '26-01-01_Band_MULTITRACK.zip').exists()
 
     def test_skips_existing_zip(self, tmp_path):
         fa = _FakeAudio(tmp_path)
         f = self._wav(tmp_path, '26-01-01_Band_ch01.wav')
-        existing = fa.audio_dest / '26-01-01_Band.zip'
+        existing = fa.audio_dest / '26-01-01_Band_MULTITRACK.zip'
         existing.write_bytes(b'sentinel')
         fa._zip_wav_group(
             '26-01-01_Band', [f],

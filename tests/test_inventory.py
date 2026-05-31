@@ -13,35 +13,63 @@ from nofun.inventory import (
     classify_location,
     extract_date_band,
     extract_date_band_from_path,
+    perf_key,
     rows_from_db,
     scan_files,
+    short_date,
 )
 
 
 class TestExtractDateBand:
     @pytest.mark.parametrize("filename,exp_date,exp_band", [
         # Standard short-date format
-        ("26-2-7_NoFun_DeadGowns_UL.mp4",  "2026-02-07", "NoFun_DeadGowns"),
-        ("26-2-7_NoFun_DeadGowns_ch01.wav", "2026-02-07", "NoFun_DeadGowns"),
-        ("26-01-24 Film and Gender Audio.wav", "2026-01-24", "Film_and_Gender"),
+        ("26-2-7_NoFun_DeadGowns_CAM1.mp4", "26-02-07", "NoFun_DeadGowns"),
+        ("26-2-7_NoFun_DeadGowns_ch01.wav", "26-02-07", "NoFun_DeadGowns"),
+        ("26-01-24 Film and Gender Audio.wav", "26-01-24", "Film_and_Gender"),
         # Audio recorder format
         ("R_20260207-143022.wav",           "2026-02-07", "Audio Recorder"),
         # Long-date format
-        ("20260207_SomeBand.mov",           "2026-02-07", "SomeBand"),
+        ("20260207_SomeBand.mov",           "26-02-07", "SomeBand"),
         # Unrecognised
         ("random_file.mp4",                "TBD",        "TBD"),
         # Zero-padded short date
-        ("26-01-01_BandName.mov",          "2026-01-01", "BandName"),
+        ("26-01-01_BandName.mov",          "26-01-01", "BandName"),
         # Pre-split channel WAVs from Audio/ subfolder
-        ("26-3-11_DAISY_CHAIN_chan7.3.wav", "2026-03-11", "DAISY_CHAIN"),
-        ("26-3-11_DAISY_CHAIN_chan12.wav",  "2026-03-11", "DAISY_CHAIN"),
-        ("26-3-11_DAISY_CHAIN_chan7.wav",   "2026-03-11", "DAISY_CHAIN"),
-        ("26-3-11_DAISY_CHAIN_chan.wav",    "2026-03-11", "DAISY_CHAIN"),   # no digits
+        ("26-3-11_DAISY_CHAIN_chan7.3.wav", "26-03-11", "DAISY_CHAIN"),
+        ("26-3-11_DAISY_CHAIN_chan12.wav",  "26-03-11", "DAISY_CHAIN"),
+        ("26-3-11_DAISY_CHAIN_chan7.wav",   "26-03-11", "DAISY_CHAIN"),
+        ("26-3-11_DAISY_CHAIN_chan.wav",    "26-03-11", "DAISY_CHAIN"),   # no digits
     ])
     def test_formats(self, filename, exp_date, exp_band):
         date, band = extract_date_band(filename)
         assert date == exp_date, f"date mismatch for {filename}"
         assert band == exp_band, f"band mismatch for {filename}"
+
+
+class TestPerfKey:
+    """Canonical perf identity helper (nofun/inventory.py). Date axis only —
+    band is assembled verbatim; band normalisation lives in extract_date_band."""
+
+    def test_short_date_truncates_long(self):
+        assert short_date('2026-05-25') == '26-05-25'
+
+    def test_short_date_idempotent(self):
+        assert short_date('26-05-25') == '26-05-25'
+
+    def test_short_date_leaves_tbd(self):
+        assert short_date('TBD') == 'TBD'
+
+    def test_perf_key_normalises_long_date(self):
+        assert perf_key('2026-05-25', 'ALTAR') == '26-05-25_ALTAR'
+
+    def test_perf_key_idempotent_on_short(self):
+        assert perf_key('25-05-25', 'ALTAR') == '25-05-25_ALTAR'
+
+    def test_perf_key_passes_band_verbatim(self):
+        # perf_key does NOT re-clean the band (decided 2026-05-31): a distinct
+        # sub-performance suffix must survive untouched, never merged away.
+        assert perf_key('26-03-14', 'THE_OBSESSED_ENCORE') == '26-03-14_THE_OBSESSED_ENCORE'
+        assert perf_key('26-03-14', 'THE_OBSESSED_SOUNDCHECK') == '26-03-14_THE_OBSESSED_SOUNDCHECK'
 
 
 class TestExtractDateBandFromPath:
@@ -50,12 +78,12 @@ class TestExtractDateBandFromPath:
         folder.mkdir()
         f = folder / 'DAISY_CHAIN_UL.mp4'
         f.touch()
-        assert extract_date_band_from_path(f) == ('2026-05-17', 'DAISY_CHAIN')
+        assert extract_date_band_from_path(f) == ('26-05-17', 'DAISY_CHAIN')
 
     def test_uses_filename_when_present(self, tmp_path):
         f = tmp_path / '26-05-17_BAND_UL.mp4'
         f.touch()
-        assert extract_date_band_from_path(f) == ('2026-05-17', 'BAND')
+        assert extract_date_band_from_path(f) == ('26-05-17', 'BAND')
 
     def test_tbd_when_neither_has_date(self, tmp_path):
         folder = tmp_path / 'random'
@@ -71,7 +99,7 @@ class TestExtractDateBandFromPath:
         f = folder / 'OTHER_BAND.zip'
         f.touch()
         date, band = extract_date_band_from_path(f)
-        assert date == '2026-05-17'
+        assert date == '26-05-17'
         assert band == 'OTHER_BAND'
 
 
@@ -109,16 +137,16 @@ class TestCleanBand:
     def test_extract_date_band_with_space_in_name(self):
         """extract_date_band returns underscore-normalised band for spaced filenames."""
         date, band = extract_date_band("26-05-13_B hvpie_chan11.25")
-        assert date == "2026-05-13"
+        assert date == "26-05-13"
         assert ' ' not in band
         assert band == "B_hvpie"
 
 
 class TestClassifyFile:
     @pytest.mark.parametrize("name,path_str,expected", [
-        ("foo_UL.mp4",                    "/d/videos/foo_UL.mp4",        "quadrant"),
-        ("foo_LR.mp4",                    "/d/videos/foo_LR.mp4",        "quadrant"),
-        ("foo_UL_1.mp4",                  "/d/clips/foo/foo_UL_1.mp4",   "clip"),
+        ("foo_CAM1.mp4",                  "/d/videos/foo_CAM1.mp4",      "quadrant"),
+        ("foo_CAM4.mp4",                  "/d/videos/foo_CAM4.mp4",      "quadrant"),
+        ("foo_CAM1_1.mp4",                "/d/clips/foo/foo_CAM1_1.mp4", "clip"),
         ("band.zip",                      "/d/audio/band.zip",            "zipped audio"),
         ("band_ch01.wav",                 "/c/source/band_ch01.wav",      "audio"),
         ("rec.mov",                       "/c/VenueLighting/rec.mov",     "raw video"),
@@ -126,9 +154,9 @@ class TestClassifyFile:
         ("foo.mp4",                       "/d/other/foo.mp4",             "re-encoded"),
         ("foo.mp4",                       "/d/trial_runs/clips/x/f.mp4",  "clip"),
         # REMASTER outputs must not be classified as generic audio/video
-        ("26-04-07_MX_LONELY_FULLSET.wav", "/d/audio/26-04-07_MX_LONELY_FULLSET.wav", "fullset audio"),
-        ("26-04-07_PFC_PRIZE_FULLSET.wav", "/d/audio/26-04-07_PFC_PRIZE_FULLSET.wav", "fullset audio"),
-        ("26-04-07_PFC_PRIZE_reel.mp4",    "/d/videos/26-04-07_PFC_PRIZE_reel.mp4",   "reel video"),
+        ("26-04-07_MX_LONELY_AUDIO.mp3",  "/d/audio/26-04-07_MX_LONELY_AUDIO.mp3", "fullset audio"),
+        ("26-04-07_PFC_PRIZE_AUDIO.mp3",  "/d/audio/26-04-07_PFC_PRIZE_AUDIO.mp3", "fullset audio"),
+        ("26-04-07_PFC_PRIZE_INSTAGRAM.mp4", "/d/videos/26-04-07_PFC_PRIZE_INSTAGRAM.mp4", "reel video"),
     ])
     def test_classify(self, name, path_str, expected):
         assert classify_file(name, pathlib.Path(path_str)) == expected
@@ -251,7 +279,7 @@ class TestRowsFromDb:
         result = rows_from_db(db)
         assert len(result) == 1
         r = result[0]
-        assert r['date']     == '2026-01-01'
+        assert r['date']     == '26-01-01'
         assert r['band']     == 'Band'
         assert r['type']     == 'quadrant'
         assert r['location'] == 'archive'
@@ -306,7 +334,7 @@ class TestRowsFromDb:
         result = rows_from_db(db)
         clip_rows = [r for r in result if r['type'] == 'clip']
         assert len(clip_rows) == 1
-        assert clip_rows[0]['date'] == '2026-03-20'
+        assert clip_rows[0]['date'] == '26-03-20'
         assert clip_rows[0]['band'] == 'BAND'
         assert clip_rows[0]['size'] == 2100
 

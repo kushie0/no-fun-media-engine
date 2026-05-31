@@ -63,7 +63,7 @@ from nofun.cleanup import (
 )
 from nofun.encoding_db import EncodingDB
 from nofun.inventory import (
-    EXPIRE_AGE, RAW_EXPIRE_AGE, extract_date_band,
+    EXPIRE_AGE, RAW_EXPIRE_AGE, extract_date_band, perf_key, short_date,
     _status_label, _STATUS_ICON,
 )
 from nofun.job_manifest import JobManifest
@@ -934,15 +934,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
     def _enqueue_reupload(self, date_str: str, band: str) -> None:
         """Enqueue a REUPLOAD job for *band* on *date_str* as a MANUAL queue entry."""
         from nofun.job_manifest import JobManifest, PipelineJob
-        perf_key = f"{date_str[2:] if date_str.startswith('20') else date_str}_{band}_REUPLOAD"
+        manifest_key = perf_key(date_str, band) + '_REUPLOAD'
         # Skip if already pending or running for this band
         active_keys = {qj.manifest_key for qj in self._job_queue.all_active()}
-        if perf_key in active_keys:
+        if manifest_key in active_keys:
             self.logger.info(f"NOTICE  REUPLOAD already queued for {band}")
             return
         job = PipelineJob(kind='_reupload', label=f'REUPLOAD {band}', priority=5)
         manifest = JobManifest(
-            performance_key=perf_key,
+            performance_key=manifest_key,
             jobs=[job],
             python_fns={job.job_id: lambda d=date_str, b=band: self._do_reupload(d, b)},
         )
@@ -983,15 +983,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             _mastering._ott_plugin_attempted = False
 
         # Perf key used to record outcome for _do_reel_for_perf (YY-MM-DD_Band form).
-        short_date = date_str[2:] if date_str.startswith('20') else date_str
-        perf_key   = f'{short_date}_{ps.band}'
+        short = short_date(date_str)
+        perf  = perf_key(date_str, ps.band)
 
         if not ps.zip_files:
             self.logger.info(
                 f"REMASTER  no ZIP found for {ps.band} — skipping  "
-                f"(downstream REEL will skip until AUDIO produces {perf_key}.zip)"
+                f"(downstream REEL will skip until AUDIO produces {perf}.zip)"
             )
-            self._remaster_status[perf_key] = 'no_zip'
+            self._remaster_status[perf] = 'no_zip'
             return
 
         zip_path = ps.zip_files[0]
@@ -1003,15 +1003,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             def _norm(stem: str) -> str:
                 return stem.replace(' ', '_').replace('_MULTITRACK', '')
             cands = sorted(
-                (z for z in self.audio_dest.glob(f'{short_date}_*.zip')
-                 if _norm(z.stem) == perf_key),
+                (z for z in self.audio_dest.glob(f'{short}_*.zip')
+                 if _norm(z.stem) == perf),
                 key=lambda z: '_MULTITRACK' not in z.stem,  # prefer multitrack ZIP
             )
             if not cands:
                 self.logger.warning(
-                    f"REMASTER  ZIP path stale, no on-disk match for {perf_key}: {zip_path.name}"
+                    f"REMASTER  ZIP path stale, no on-disk match for {perf}: {zip_path.name}"
                 )
-                self._remaster_status[perf_key] = 'no_zip'
+                self._remaster_status[perf] = 'no_zip'
                 self._clear_op('remaster')
                 return
             self.logger.info(f"REMASTER  resolved stale ZIP path → {cands[0].name}")
@@ -1020,7 +1020,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # underscores), NOT the ZIP filename — ZIP stems carry _MULTITRACK and can
         # contain spaces (e.g. "26-05-13_Mall Goth_MULTITRACK.zip"), which would
         # name the master differently from what REEL/existing_fullset look up.
-        base     = perf_key   # e.g. 26-04-11_ALTAR
+        base     = perf   # e.g. 26-04-11_ALTAR
 
         self.logger.info(f"REMASTER  {base}")
         self._set_op('remaster', f'REMASTER  {base}')
@@ -1043,7 +1043,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     wav_files = sorted(tmp_path.glob('*.wav'))
                     if not wav_files:
                         self.logger.warning(f"REMASTER  ZIP contains no WAVs: {zip_path.name}")
-                        self._remaster_status[perf_key] = 'zip_empty'
+                        self._remaster_status[perf] = 'zip_empty'
                         self._clear_op('remaster')
                         return
                     clip_arg = (_TEST_SEEK, _TEST_SEEK + trial_seconds) if trial_seconds else None
@@ -1054,7 +1054,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                                                denoise_room=True, dyers=True)
             except Exception as exc:
                 self.logger.error(f"REMASTER  {base}  mastering failed: {exc!r}", exc_info=exc)
-                self._remaster_status[perf_key] = 'mastering_error'
+                self._remaster_status[perf] = 'mastering_error'
                 self._clear_op('remaster')
                 return
 
@@ -1070,7 +1070,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 f"REMASTER  {base}  no audio master produced "
                 f"(missing or unusable source WAVs in {zip_path.name})"
             )
-            self._remaster_status[perf_key] = 'no_audio'
+            self._remaster_status[perf] = 'no_audio'
             self._clear_op('remaster')
             return
 
@@ -1095,7 +1095,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     dehydrate_cloud_files([sp_dst], self.logger)
 
         self.logger.info(f"REMASTER  {base}  done")
-        self._remaster_status[perf_key] = 'ok'
+        self._remaster_status[perf] = 'ok'
         self._clear_op('remaster')
         if self._active_menu == MenuMode.STATUS:
             self._show_status_list()
@@ -1117,7 +1117,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         YY-MM-DD_<band>_REMASTER; otherwise all bands run under YY-MM-DD_REMASTER.
         """
         from nofun.job_manifest import JobManifest, PipelineJob
-        short = date_str[2:] if date_str.startswith('20') else date_str
+        short = short_date(date_str)
         bands = [
             ps for (d, _), ps in self._status_entries
             if d == date_str and ps.band not in ('NOFUN', 'TBD', '')
@@ -1145,7 +1145,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             )
             cat_map[master_job.job_id] = JobCategory.MANUAL
 
-            perf = f"{short}_{ps.band}"
+            perf = perf_key(date_str, ps.band)
             reel_job = PipelineJob(
                 kind='generate_reel',
                 label=f"{short} {ps.band} REEL",
@@ -1156,8 +1156,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             python_fns[reel_job.job_id] = lambda p=perf, _o=reel_overwrite: self._do_reel_for_perf(p, overwrite=_o)
             cat_map[reel_job.job_id] = JobCategory.MANUAL  # user-initiated, no time gate
 
-        perf_key = f"{short}_{band}_REMASTER" if band else f"{short}_REMASTER"
-        manifest = JobManifest(performance_key=perf_key, jobs=jobs, python_fns=python_fns)
+        manifest_key = perf_key(date_str, band) + '_REMASTER' if band else f"{short}_REMASTER"
+        manifest = JobManifest(performance_key=manifest_key, jobs=jobs, python_fns=python_fns)
         self._job_queue.enqueue(manifest, JobCategory.MANUAL, category_map=cat_map)
         if trial_seconds:
             self.logger.info(f"REMASTER  queued {len(bands)} band(s) (trial {trial_seconds}s)")
@@ -1192,7 +1192,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             if not (ps.zip_files and len(ps.quad_files) >= 4):
                 continue
-            short = date[2:] if date.startswith('20') else date  # normalise to YY-MM-DD
+            short = short_date(date)
             try:
                 y, mo, d = short.split('-')
                 rec_date = datetime.date(2000 + int(y), int(mo), int(d))
@@ -1200,7 +1200,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             if (today - rec_date).days > EXPIRE_AGE:
                 continue
-            perf    = f'{short}_{band}'
+            perf    = perf_key(date, band)
             audio   = self.audio_dest / f'{perf}_AUDIO.mp3'
             reel_ok = any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
             if audio.exists() and reel_ok:
@@ -1209,7 +1209,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             # normalise to the same perf, so the second must see the first's
             # just-enqueued REMASTER (which a snapshot taken before the loop
             # misses). _enqueued_keys still guards an in-flight full pipeline.
-            rk = f'{short}_{band}_REMASTER'
+            rk = perf_key(date, band) + '_REMASTER'
             if any(qj.manifest_key == rk for qj in self._job_queue.all_active()) \
                     or perf in self._enqueued_keys:
                 continue

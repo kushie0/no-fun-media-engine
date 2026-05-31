@@ -73,6 +73,7 @@ class _FakePipeline(Pipeline):
         self._show_groups:    list = []
         self._status_expanded_key  = None
         self._rename_state         = None
+        self._remaster_state       = None
         self._rename_date          = None
         self._rename_band          = None
         self._rename_new_name      = None

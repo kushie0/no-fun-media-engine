@@ -166,12 +166,12 @@ class TestEncodingDBUnscannedPaths:
 
 class TestEncodingDBPruneOrphanedBands:
     def test_removes_phantom_band(self, db: EncodingDB) -> None:
-        db.upsert('2026-04-07', 'MX_LONELY', 'quadrant_video', _rec('/a_UL.mp4'))
-        db.upsert('2026-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec('/a_FULLSET.wav'))
-        pruned = db.prune_orphaned_bands({'2026-04-07': {'MX_LONELY'}})
+        db.upsert('26-04-07', 'MX_LONELY', 'quadrant_video', _rec('/a_UL.mp4'))
+        db.upsert('26-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec('/a_FULLSET.wav'))
+        pruned = db.prune_orphaned_bands({'26-04-07': {'MX_LONELY'}})
         assert pruned == 1
-        assert db.get_performance('2026-04-07', 'MX_LONELY') is not None
-        assert db.get_performance('2026-04-07', 'MX_LONELY_FULLSET') is None
+        assert db.get_performance('26-04-07', 'MX_LONELY') is not None
+        assert db.get_performance('26-04-07', 'MX_LONELY_FULLSET') is None
 
     def test_leaves_unscanned_dates_intact(self, db: EncodingDB) -> None:
         db.upsert('2026-03-01', 'OTOBO', 'quadrant_video', _rec('/a.mp4'))
@@ -185,18 +185,18 @@ class TestEncodingDBPruneOrphanedBands:
         assert db.prune_orphaned_bands({'2026-04-07': {'MX_LONELY'}}) == 0
 
     def test_index_updated_after_prune(self, db: EncodingDB) -> None:
-        path = '/2026-04-07_MX_LONELY_FULLSET.wav'
-        db.upsert('2026-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec(path))
-        db.prune_orphaned_bands({'2026-04-07': {'MX_LONELY'}})
+        path = '/26-04-07_MX_LONELY_FULLSET.wav'
+        db.upsert('26-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec(path))
+        db.prune_orphaned_bands({'26-04-07': {'MX_LONELY'}})
         assert db.lookup(pathlib.Path(path)) is None
 
     def test_prunes_multiple_phantoms(self, db: EncodingDB) -> None:
-        db.upsert('2026-04-07', 'MX_LONELY', 'quadrant_video', _rec('/a.mp4'))
-        db.upsert('2026-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec('/b.wav'))
-        db.upsert('2026-04-07', 'PFC_PRIZE_reel', 'source_audio', _rec('/c.wav'))
-        pruned = db.prune_orphaned_bands({'2026-04-07': {'MX_LONELY', 'PFC_PRIZE'}})
+        db.upsert('26-04-07', 'MX_LONELY', 'quadrant_video', _rec('/a.mp4'))
+        db.upsert('26-04-07', 'MX_LONELY_FULLSET', 'source_audio', _rec('/b.wav'))
+        db.upsert('26-04-07', 'PFC_PRIZE_reel', 'source_audio', _rec('/c.wav'))
+        pruned = db.prune_orphaned_bands({'26-04-07': {'MX_LONELY', 'PFC_PRIZE'}})
         assert pruned == 2
-        assert db.get_performance('2026-04-07', 'MX_LONELY') is not None
+        assert db.get_performance('26-04-07', 'MX_LONELY') is not None
 
 
 class TestEncodingDBAllPerformances:
@@ -205,7 +205,8 @@ class TestEncodingDBAllPerformances:
         db.upsert('2026-03-20', 'B', 'quadrant_video', _rec('/b.mp4'))
         db.upsert('2026-03-10', 'C', 'quadrant_video', _rec('/c.mp4'))
         dates = [d for d, _, _ in db.all_performances()]
-        assert dates == ['2026-03-20', '2026-03-10', '2026-03-01']
+        # upsert normalises long YYYY-MM-DD → short YY-MM-DD (§3a)
+        assert dates == ['26-03-20', '26-03-10', '26-03-01']
 
     def test_empty_db_returns_empty(self, db: EncodingDB) -> None:
         assert db.all_performances() == []
@@ -335,15 +336,15 @@ class TestMigrateClipsToSummary:
         p.write_text(json.dumps({
             'schema': 1,
             'performances': {
-                '2026-03-20': {'BAND': {'clips': [
+                '26-03-20': {'BAND': {'clips': [
                     {'path': 'D:/clips/26-03-20_BAND/c1.mp4', 'size': 500,
                      'mtime': 1700000000.0, 'scanned': '2026-03-20T00:00:00'},
                 ]}}
             }
         }))
         db = EncodingDB(p)
-        assert db._data['schema'] == 3
-        cs = db.get_clips_summary('2026-03-20', 'BAND')
+        assert db._data['schema'] == 4
+        cs = db.get_clips_summary('26-03-20', 'BAND')
         assert cs is not None
         assert cs['count'] == 1
 
@@ -407,6 +408,118 @@ class TestMigrateNormalizeBandKeys:
             }
         }))
         db = EncodingDB(p)
-        assert db._data['schema'] == 3
-        assert 'B hvpie' not in db._data['performances']['2026-05-13']
-        assert 'B_hvpie' in db._data['performances']['2026-05-13']
+        assert db._data['schema'] == 4
+        # the schema-4 date migration also re-keys 2026-05-13 -> 26-05-13
+        assert 'B hvpie' not in db._data['performances']['26-05-13']
+        assert 'B_hvpie' in db._data['performances']['26-05-13']
+
+
+class TestMigrateNormalizeDateKeys:
+    def test_long_only_key_renamed_records_intact(self, db: EncodingDB) -> None:
+        db._data = {
+            'schema': 3, 'performances': {
+                '2024-12-15': {'OLDSHOW': {
+                    'quadrant_video': [{'path': 'D:/v/24-12-15_OLDSHOW/q.mp4'}],
+                    'runtime_seconds': 100.0,
+                }}
+            }
+        }
+        n = db.migrate_normalize_date_keys()
+        assert n == 1
+        perfs = db._data['performances']
+        assert '2024-12-15' not in perfs
+        assert '24-12-15' in perfs
+        old = perfs['24-12-15']['OLDSHOW']
+        assert old['runtime_seconds'] == 100.0
+        assert old['quadrant_video'][0]['path'] == 'D:/v/24-12-15_OLDSHOW/q.mp4'
+
+    def test_twin_keeps_short_records_drops_stale_carries_runtime(self, db: EncodingDB) -> None:
+        db._data = {
+            'schema': 3, 'performances': {
+                '2026-05-25': {  # long twin: stale file records + the only runtime
+                    'LIP_CRITIC': {
+                        'raw_video': [{'path': 'D:/raw/26-05-25_LIP_CRITIC.mov'}],
+                        'runtime_seconds': 222.0,
+                    },
+                    'LONGONLYBAND': {'quadrant_video': [{'path': 'D:/v/x.mp4'}]},
+                },
+                '26-05-25': {  # short twin: current-disk truth, no runtime
+                    'LIP_CRITIC': {
+                        'quadrant_video': [{'path': 'D:/v/26-05-25_LIP_CRITIC/q.mp4'}],
+                    },
+                },
+            }
+        }
+        n = db.migrate_normalize_date_keys()
+        assert n == 1
+        perfs = db._data['performances']
+        assert '2026-05-25' not in perfs
+        short = perfs['26-05-25']
+        # short's file-backed records preserved
+        assert short['LIP_CRITIC']['quadrant_video'][0]['path'].endswith('q.mp4')
+        # long's stale raw_video is NOT unioned back in
+        assert 'raw_video' not in short['LIP_CRITIC']
+        # runtime_seconds carried over from long into short (the one unrebuildable scalar)
+        assert short['LIP_CRITIC']['runtime_seconds'] == 222.0
+        # band present only under the long key moved wholesale
+        assert 'LONGONLYBAND' in short
+
+    def test_twin_does_not_overwrite_existing_short_runtime(self, db: EncodingDB) -> None:
+        db._data = {
+            'schema': 3, 'performances': {
+                '2026-05-25': {'B': {'runtime_seconds': 111.0}},
+                '26-05-25': {'B': {'runtime_seconds': 999.0,
+                                   'quadrant_video': [{'path': 'D:/v/q.mp4'}]}},
+            }
+        }
+        db.migrate_normalize_date_keys()
+        assert db._data['performances']['26-05-25']['B']['runtime_seconds'] == 999.0
+
+    def test_no_band_dropped_invariant(self, db: EncodingDB) -> None:
+        db._data = {
+            'schema': 3, 'performances': {
+                '2026-05-25': {'A': {}, 'B': {}, 'LONGONLY': {}},
+                '26-05-25': {'A': {}, 'C': {}},
+                '2024-01-01': {'SOLO': {}},
+            }
+        }
+        # bands reachable before, keyed by normalised date
+        before: dict[str, set[str]] = {}
+        for d, bands in db._data['performances'].items():
+            before.setdefault(d[2:] if len(d) == 10 else d, set()).update(bands)
+        db.migrate_normalize_date_keys()
+        after = {d: set(bands) for d, bands in db._data['performances'].items()}
+        for d, bands in before.items():
+            assert bands <= after[d], f"band dropped under {d}"
+
+    def test_idempotent_second_pass_is_noop(self, db: EncodingDB) -> None:
+        db._data = {
+            'schema': 3, 'performances': {
+                '2026-05-25': {'B': {'runtime_seconds': 1.0}},
+                '26-05-25': {'B': {'quadrant_video': [{'path': 'D:/v/q.mp4'}]}},
+            }
+        }
+        assert db.migrate_normalize_date_keys() == 1
+        assert db.migrate_normalize_date_keys() == 0
+        assert [k for k in db._data['performances'] if len(k) == 10] == []
+
+    def test_auto_migration_on_load_bumps_schema_and_backs_up(self, tmp_path: pathlib.Path) -> None:
+        p = tmp_path / 'db.json'
+        p.write_text(json.dumps({
+            'schema': 3, 'performances': {
+                '2026-05-25': {'LIP_CRITIC': {'runtime_seconds': 222.0}},
+                '26-05-25': {'LIP_CRITIC': {
+                    'quadrant_video': [{'path': 'D:/v/26-05-25_LIP_CRITIC/q.mp4'}]}},
+            }
+        }))
+        db = EncodingDB(p)
+        assert db._data['schema'] == 4
+        perfs = db._data['performances']
+        assert '2026-05-25' not in perfs
+        assert perfs['26-05-25']['LIP_CRITIC']['runtime_seconds'] == 222.0
+        # the migration wrote a pre-mutation backup
+        assert (tmp_path / 'db.pre-v4.bak').exists()
+        # reloading is a no-op: no long keys remain, schema already 4
+        db2 = EncodingDB(p)
+        assert db2._data['schema'] == 4
+        assert [k for k in db2._data['performances'] if len(k) == 10] == []

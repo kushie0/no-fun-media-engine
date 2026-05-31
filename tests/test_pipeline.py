@@ -283,7 +283,7 @@ class TestRemasterStatusTracker:
         # Pre-create the canonical audio file so the existing_fullset path is taken
         # (avoids numpy/scipy dependency while still exercising the base derivation).
         canonical = fp.audio_dest / '26-05-28_Jermey_Gold_AUDIO.mp3'
-        canonical.touch()
+        canonical.write_bytes(b'\x00')
         fp._do_remaster_for_band('2026-05-28', ps)
         assert fp._remaster_status.get('26-05-28_Jermey_Gold') == 'ok'
 
@@ -303,7 +303,7 @@ class TestRemasterStatusTracker:
         # Canonical underscore name present → existing_fullset path taken (no numpy).
         # If base were derived from the space-named ZIP, this lookup would miss and the
         # empty .touch()'d ZIP would fail extraction → status 'mastering_error'.
-        (fp.audio_dest / '26-05-13_Mall_Goth_AUDIO.mp3').touch()
+        (fp.audio_dest / '26-05-13_Mall_Goth_AUDIO.mp3').write_bytes(b'\x00')
         fp._do_remaster_for_band('2026-05-13', ps)
         assert fp._remaster_status.get('26-05-13_Mall_Goth') == 'ok'
 
@@ -331,7 +331,7 @@ class TestRemasterStatusTracker:
         ps = PerformanceState(date='2026-05-04', band='FORCE_RAVE')
         ps.zip_files = [fp.audio_dest / '26-05-04_FORCE_RAVE.zip']         # stale path
         (fp.audio_dest / '26-05-04_FORCE_RAVE_MULTITRACK.zip').touch()     # real file present
-        (fp.audio_dest / '26-05-04_FORCE_RAVE_AUDIO.mp3').touch()          # existing_fullset → ok
+        (fp.audio_dest / '26-05-04_FORCE_RAVE_AUDIO.mp3').write_bytes(b'\x00')  # existing_fullset → ok
         with caplog.at_level(logging.INFO, logger='test_remaster'):
             fp._do_remaster_for_band('2026-05-04', ps)
         assert fp._remaster_status.get('26-05-04_FORCE_RAVE') == 'ok'

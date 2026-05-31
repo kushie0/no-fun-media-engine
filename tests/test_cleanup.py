@@ -310,7 +310,7 @@ class TestAuditChecks:
         (tmp_path / '26-01-01_Band_chan1.wav').write_bytes(b'\x00' * 100)
         (tmp_path / '26-01-01_Band_chan2.wav').write_bytes(b'\x00' * 100)
         fp._encoding_db = EncodingDB(tmp_path / 'db.json')
-        fp._encoding_db.upsert('2026-01-01', 'Band', 'audio_all_silent',
+        fp._encoding_db.upsert('26-01-01', 'Band', 'audio_all_silent',
                                {'path': '26-01-01_Band', 'updated': '2026-01-01T00:00:00'})
         result = fp._check_orphaned_hardware_wavs()
         assert len(result) == 1
@@ -643,14 +643,14 @@ class TestAutoExpireRawWithQualityGate:
 
     def test_wav_deleted_when_zip_verified(self, tmp_path):
         """Old .wav, valid ZIP exists → deleted.
-        ZIP is named with the normalized date '2026-04-06_ALTAR_MULTITRACK.zip' — the form
+        ZIP is named with the normalized date '26-04-06_ALTAR_MULTITRACK.zip' — the form
         that extract_date_band returns and that _zip_wav_group uses.
         """
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
 
-        zip_path = fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip'
+        zip_path = fp.audio_dest / '26-04-06_ALTAR_MULTITRACK.zip'
         with zipfile.ZipFile(zip_path, 'w') as zf:
             zf.writestr('channel_01.wav', b'audio data')
 
@@ -663,7 +663,7 @@ class TestAutoExpireRawWithQualityGate:
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
-        (fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
+        (fp.audio_dest / '26-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
 
         fp._auto_expire_raw_files()
 
@@ -686,7 +686,7 @@ class TestAutoExpireRawWithQualityGate:
         fp = _FakePipeline(tmp_path)
         wav = fp.audio_archive / '26-04-06_ALTAR.wav'
         wav.write_bytes(b'\x00')
-        (fp.audio_dest / '2026-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
+        (fp.audio_dest / '26-04-06_ALTAR_MULTITRACK.zip').write_bytes(b'not a zip')
         findings = fp._check_expired_raw_wavs()
         assert findings == []
 

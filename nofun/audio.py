@@ -15,7 +15,7 @@ import zlib
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from nofun.inventory import extract_date_band
+from nofun.inventory import extract_date_band, perf_key
 from nofun.media_io import DeleteQueue, fmt_size, format_eta, probe_stream
 from nofun.paths import NULL_DEV
 from nofun.script_runner import ScriptRunner, ScriptJob
@@ -360,7 +360,7 @@ class AudioMixin:
             band = re.sub(r'_ch\d+$', '', band)
             band = re.sub(r'\.[0-9]+$', '', band)
 
-            groups[f'{date}_{band}'].append(f)
+            groups[perf_key(date, band)].append(f)
         return groups
 
     @staticmethod
@@ -374,14 +374,11 @@ class AudioMixin:
                 mtime = 0.0
             date = datetime.datetime.fromtimestamp(mtime).strftime('%y-%m-%d')
             band = re.sub(r'\.(wav|mp4|mov)$', '', path.name, flags=re.IGNORECASE)
-        else:
-            if len(date) == 10 and date[:2] == '20':
-                date = date[2:]
         band = re.sub(r'_chan[\d.]*$', '', band)
         band = re.sub(r'_ch\d+$', '', band)
         band = re.sub(r'\.[0-9]+$', '', band)
         band = re.sub(r'_(CAM[1-4])$', '', band, flags=re.IGNORECASE)
-        return f'{date}_{band}'
+        return perf_key(date, band)
 
     def _create_and_verify_zip(self, zip_path: pathlib.Path,
                                 source_files: list[pathlib.Path],

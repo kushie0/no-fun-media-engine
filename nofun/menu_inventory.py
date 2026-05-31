@@ -12,7 +12,7 @@ import datetime
 import pathlib
 
 from nofun.cleanup import canonical_sharepoint_name
-from nofun.inventory import EXPIRE_AGE, RAW_EXPIRE_AGE, _STATUS_ICON, _status_label
+from nofun.inventory import EXPIRE_AGE, RAW_EXPIRE_AGE, perf_key, short_date, _STATUS_ICON, _status_label
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory
 from nofun.media_io import fmt_size
@@ -143,8 +143,7 @@ class InventoryMenuMixin:
                 all_overdue.extend(ps.lifecycle_overdue)
             overdue_badge = '  [yellow]⏰[/yellow]' if all_overdue else ''
 
-            short_date = date[2:] if date.startswith('20') else date
-            jstatus    = self._job_queue.manifest_status_by_date(short_date)
+            jstatus    = self._job_queue.manifest_status_by_date(short_date(date))
             job_badge  = f'  [cyan]⚙ {jstatus}[/cyan]' if jstatus else ''
 
             sn      = (show_name[:54] + '..') if len(show_name) > 56 else show_name
@@ -508,7 +507,7 @@ class InventoryMenuMixin:
             return
 
         from nofun.job_manifest import PipelineJob
-        short = date[2:] if date.startswith('20') else date
+        short = short_date(date)
         job = PipelineJob(
             kind='_rename',
             label=f'{short} {old} → {new} RENAME',
@@ -601,16 +600,15 @@ class InventoryMenuMixin:
 
     def _remaster_band(self, date: str, band: str) -> None:
         """Enqueue (or restart) a REMASTER for a single band of *date*."""
-        short    = date[2:] if date.startswith('20') else date
-        perf_key = f"{short}_{band}_REMASTER"
+        manifest_key = perf_key(date, band) + '_REMASTER'
         active   = [qj for qj in self._job_queue.all_active()
-                    if qj.manifest_key == perf_key]
+                    if qj.manifest_key == manifest_key]
         if active:
             # Second press — cancel what's queued/running and restart from scratch
             running = [qj for qj in active if qj.status == 'running']
             if running:
                 self._kill_all_ffmpeg_procs()
-            self._job_queue.cancel_manifest(perf_key)
+            self._job_queue.cancel_manifest(manifest_key)
             self._enqueue_remaster(date, force=True, band=band)
         else:
             self._enqueue_remaster(date, band=band)

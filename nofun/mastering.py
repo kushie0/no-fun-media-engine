@@ -1659,7 +1659,7 @@ if __name__ == '__main__':
     if not root.is_dir():
         parser.error(f'Not a directory: {root}')
 
-    from nofun.inventory import extract_date_band
+    from nofun.inventory import extract_date_band, perf_key
     from nofun.paths import detect_mounts
 
     clip = tuple(args.clip) if args.clip else None  # type: ignore[arg-type]
@@ -1697,9 +1697,7 @@ if __name__ == '__main__':
         date, band = extract_date_band(name)
         if date == 'TBD':
             return name
-        if len(date) == 10 and date.startswith('20'):
-            date = date[2:]
-        return f'{date}_{band}'
+        return perf_key(date, band)
 
     def _run_one(wav_files: list[Path], base: str, out_dir: Path) -> list[Path]:
         _log.info(f'Base name: {base}  ({len(wav_files)} WAVs)')

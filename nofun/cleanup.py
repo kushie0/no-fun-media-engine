@@ -18,6 +18,7 @@ from nofun.inventory import (
     classify_file,
     classify_location,
     extract_date_band,
+    perf_key,
     scan_files,
 )
 from nofun.media_io import DeleteQueue, fmt_size
@@ -780,12 +781,12 @@ class CleanupMixin:
                 continue
             if (today - rec_date).days <= RAW_EXPIRE_AGE:
                 continue
-            if f'{date_str}_{band}' not in zip_stems:
+            if perf_key(date_str, band) not in zip_stems:
                 continue
             groups.setdefault((date_str, band), []).append(wav)
 
         for (date_str, band), wavs in sorted(groups.items()):
-            if not self._zip_verified(f'{date_str}_{band}'):
+            if not self._zip_verified(perf_key(date_str, band)):
                 self.logger.warning(
                     f"EXPIRE  skipped raw WAVs for {date_str} {band} — ZIP probe failed"
                 )

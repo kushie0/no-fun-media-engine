@@ -108,7 +108,7 @@ class TestEncodeQuadrants:
         source.write_bytes(b'\x00')
 
         base  = source.stem
-        quads = ('UL', 'UR', 'LL', 'LR')
+        quads = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
         for q in quads:
             (fp.vids_dest / f'{base}_{q}_temp.mp4').write_bytes(b'\x00')
 
@@ -130,7 +130,7 @@ class TestEncodeQuadrants:
         source = tmp_path / '26-01-01_TestBand.mov'
         source.write_bytes(b'\x00')
         base  = source.stem
-        quads = ('UL', 'UR', 'LL', 'LR')
+        quads = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
 
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
             for q in quads:
@@ -157,7 +157,7 @@ class TestEncodeQuadrants:
         fp = _FakePipeline(tmp_path)
         fp._encoding_db = EncodingDB(tmp_path / 'encoding_db.json')
         base = '26-01-01_TestBand'
-        dests = {q: fp.vids_dest / f'{base}_{q}.mp4' for q in ('UL', 'UR', 'LL', 'LR')}
+        dests = {q: fp.vids_dest / f'{base}_{q}.mp4' for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4')}
         for p in dests.values():
             p.write_bytes(b'\x00')
 
@@ -167,7 +167,7 @@ class TestEncodeQuadrants:
         ):
             fp._db_record_quads(base, dests)
 
-        perf = fp._encoding_db.get_performance('2026-01-01', 'TestBand')
+        perf = fp._encoding_db.get_performance('26-01-01', 'TestBand')
         assert perf is not None
         assert perf['runtime_seconds'] == 1500.0
         assert len(perf['quadrant_video']) == 4
@@ -324,7 +324,7 @@ class TestExportClips:
 
     def test_calls_runner_with_segment_time(self, tmp_path):
         fp   = _FakePipeline(tmp_path)
-        _make_quad(fp, self._BASE, 'UL')
+        _make_quad(fp, self._BASE, 'CAM1')
         captured_jobs: list = []
 
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
@@ -343,19 +343,19 @@ class TestExportClips:
     def test_clip_files_created_on_success(self, tmp_path):
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        _make_quad(fp, base, 'UL')
+        _make_quad(fp, base, 'CAM1')
 
         clips_dir = fp.clips_dest / base
 
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
             # Simulate script moving clips directly to final destination
             clips_dir.mkdir(parents=True, exist_ok=True)
-            (clips_dir / f'{base}_UL_1.mp4').write_bytes(b'\x00')
-            (clips_dir / f'{base}_UL_2.mp4').write_bytes(b'\x00')
+            (clips_dir / f'{base}_CAM1_1.mp4').write_bytes(b'\x00')
+            (clips_dir / f'{base}_CAM1_2.mp4').write_bytes(b'\x00')
             return ScriptResult(
                 script='export_clips', exit_code=0,
                 stdout_json={
-                    'quads': [{'quad': 'UL', 'status': 'ok', 'moved_count': 2}],
+                    'quads': [{'quad': 'CAM1', 'status': 'ok', 'moved_count': 2}],
                 },
                 stderr_tail='', elapsed=0.0,
             )
@@ -363,14 +363,14 @@ class TestExportClips:
         fp._script_runner.run.side_effect = _fake_run
         fp._export_clips(base)
 
-        assert (clips_dir / f'{base}_UL_1.mp4').exists()
-        assert (clips_dir / f'{base}_UL_2.mp4').exists()
+        assert (clips_dir / f'{base}_CAM1_1.mp4').exists()
+        assert (clips_dir / f'{base}_CAM1_2.mp4').exists()
 
     def test_temp_files_deleted_on_failure(self, tmp_path):
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        _make_quad(fp, base, 'UL')
-        temp = fp.search_dir / f'{base}_UL_temp_1.mp4'
+        _make_quad(fp, base, 'CAM1')
+        temp = fp.search_dir / f'{base}_CAM1_temp_1.mp4'
 
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
             temp.write_bytes(b'\x00')
@@ -387,10 +387,10 @@ class TestExportClips:
     def test_skips_when_clips_already_exist(self, tmp_path):
         fp      = _FakePipeline(tmp_path)
         base    = self._BASE
-        _make_quad(fp, base, 'UL')
+        _make_quad(fp, base, 'CAM1')
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir(parents=True)
-        (clips_dir / f'{base}_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / f'{base}_CAM1_1.mp4').write_bytes(b'\x00')
 
         fp._export_clips(base)
 
@@ -400,10 +400,10 @@ class TestExportClips:
         fp      = _FakePipeline(tmp_path)
         fp.force = True
         base    = self._BASE
-        _make_quad(fp, base, 'UL')
+        _make_quad(fp, base, 'CAM1')
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir(parents=True)
-        (clips_dir / f'{base}_UL_1.mp4').write_bytes(b'\x00')
+        (clips_dir / f'{base}_CAM1_1.mp4').write_bytes(b'\x00')
 
         fp._script_runner.run.return_value = ScriptResult(
             script='export_clips', exit_code=1,
@@ -416,8 +416,8 @@ class TestExportClips:
     def test_runner_called_once_regardless_of_quad_count(self, tmp_path):
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        # Only UL exists — runner still called exactly once (script handles discovery)
-        _make_quad(fp, base, 'UL')
+        # Only CAM1 exists — runner still called exactly once (script handles discovery)
+        _make_quad(fp, base, 'CAM1')
 
         fp._script_runner.run.return_value = ScriptResult(
             script='export_clips', exit_code=1,
@@ -432,22 +432,22 @@ class TestExportClips:
         import json
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        # UL has 2 clips, UR has 5 — UL is behind, should resume from 3
-        for q in ('UL', 'UR'):
+        # CAM1 has 2 clips, CAM2 has 5 — CAM1 is behind, should resume from 3
+        for q in ('CAM1', 'CAM2'):
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir()
         for i in range(1, 3):
-            (clips_dir / f'{base}_UL_{i}.mp4').write_bytes(b'\x00')
+            (clips_dir / f'{base}_CAM1_{i}.mp4').write_bytes(b'\x00')
         for i in range(1, 6):
-            (clips_dir / f'{base}_UR_{i}.mp4').write_bytes(b'\x00')
+            (clips_dir / f'{base}_CAM2_{i}.mp4').write_bytes(b'\x00')
 
         captured: list = []
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
             captured.append(job.args)
             return ScriptResult(
                 script='export_clips', exit_code=0,
-                stdout_json={'quads': [{'quad': 'UL', 'status': 'ok', 'moved_count': 3}]},
+                stdout_json={'quads': [{'quad': 'CAM1', 'status': 'ok', 'moved_count': 3}]},
                 stderr_tail='', elapsed=0.0,
             )
 
@@ -456,17 +456,17 @@ class TestExportClips:
 
         assert captured
         pqs = json.loads(captured[0]['per_quad_start'])
-        assert pqs == {'UL': 3}  # UR complete (top=5), UL has 2 → resume from 3
+        assert pqs == {'CAM1': 3}  # CAM2 complete (top=5), CAM1 has 2 → resume from 3
 
     def test_skip_when_all_quads_complete(self, tmp_path):
         """All quads at same count → skip without calling runner."""
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir()
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             for i in range(1, 6):
                 (clips_dir / f'{base}_{q}_{i}.mp4').write_bytes(b'\x00')
 
@@ -483,7 +483,7 @@ class TestProcessMov:
     _BASE = '26-01-01_TestBand'
 
     def _make_all_quads(self, fp: _FakePipeline) -> None:
-        for q in ('UL', 'UR', 'LL', 'LR'):
+        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             _make_quad(fp, self._BASE, q)
 
     def test_skips_encode_when_all_quads_exist(self, tmp_path):
