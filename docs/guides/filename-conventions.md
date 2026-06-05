@@ -15,11 +15,38 @@ Both formats are accepted. `extract_date_band()` in `nofun/inventory.py` normali
 ## Output quadrant files
 
 ```
-20260311_DaisyChain_UL.mp4   ← upper-left
-20260311_DaisyChain_UR.mp4   ← upper-right
-20260311_DaisyChain_LL.mp4   ← lower-left
-20260311_DaisyChain_LR.mp4   ← lower-right
+26-03-11_DaisyChain_CAM1.mp4   ← upper-left  crop
+26-03-11_DaisyChain_CAM2.mp4   ← upper-right crop
+26-03-11_DaisyChain_CAM3.mp4   ← lower-left  crop
+26-03-11_DaisyChain_CAM4.mp4   ← lower-right crop
 ```
+
+Cloud labels map to quad position: **UL→CAM1, UR→CAM2, LL→CAM3, LR→CAM4**
+(`CAM_LABELS` / `QUAD_FILTER` in `nofun/video.py`).
+
+> **Legacy naming (pre-migration):** older outputs used `_UL/_UR/_LL/_LR.mp4`. The crop
+> geometry is identical, so these were reconciled to `_CAM1-4.mp4` by an in-place rename
+> (no re-encode). If you find old `_UL`-style names, they predate the migration.
+
+## Instagram reel
+
+```
+26-03-11_DaisyChain_INSTAGRAM.mp4   ← 9:16 vertical reel (generate_reel(), nofun/reel.py)
+```
+
+Legacy name was `_reel.mp4`; reconciled in place to `_INSTAGRAM.mp4`. The reel generator
+sources from the `_CAM1.mp4` quad — old `_UL`-named quads will not be found.
+
+## Audio master
+
+```
+26-03-11_DaisyChain_AUDIO.mp3   (or .wav)   ← mixed-down master (nofun/mastering.py)
+```
+
+> **Legacy naming (pre-migration):** `_FULLSET.mp3`/`.wav` was the **old name for the board master**,
+> superseded by the 6/1 audio-pipeline re-master that writes `_AUDIO.*`. Reconciled 2026-06-02: a
+> `_FULLSET` with no `_AUDIO` sibling was the sole master → renamed in place to `_AUDIO.*`; a `_FULLSET`
+> with a newer `_AUDIO.mp3` sibling was a superseded duplicate → deleted. No `_FULLSET` files remain.
 
 ## Proxy clips
 
@@ -67,11 +94,12 @@ multichannel files.
 ## Audio ZIP archives
 
 ```
-D:\audio\20260311_DaisyChain.zip
+<media_root>\audio\26-03-11_DaisyChain_MULTITRACK.zip
 ```
 
-All channel WAVs for a given `(date, band)` group are zipped together. The ZIP uses
-`ZIP_STORED` (no re-compression — WAV is already uncompressed PCM).
+All channel WAVs for a given `(date, band)` group are zipped together. Legacy name was a
+bare `{base}.zip`; reconciled in place to `_MULTITRACK.zip`. `<media_root>` is the NAS
+(`N:`) when reachable, else the local `D:` fallback (`detect_media_root()`, `nofun/paths.py`).
 
 ## Audio recorder files
 

@@ -263,6 +263,83 @@ class TestQueueCancel:
 
 
 # ---------------------------------------------------------------------------
+# TestStarvationGate — cross-lane CPU gate (clips held while remaster runs)
+# ---------------------------------------------------------------------------
+
+class TestStarvationGate:
+    def _enqueue_clip(self, q) -> PipelineJob:
+        clip = PipelineJob(kind='export_clips', label='clips', priority=30)
+        q.enqueue(
+            JobManifest(
+                performance_key='26-04-12_TEST',
+                jobs=[clip],
+                python_fns={clip.job_id: lambda: None},
+            ),
+            JobCategory.GPU_BOUND,
+        )
+        return clip
+
+    def _enqueue_remaster(self, q, sample) -> PipelineJob:
+        remaster = PipelineJob(kind='_remaster', label='remaster', priority=50)
+        q.enqueue(
+            JobManifest(
+                performance_key='26-04-12_TEST',
+                jobs=[remaster],
+                python_fns={remaster.job_id: sample},
+            ),
+            JobCategory.MANUAL,
+        )
+        return remaster
+
+    def test_clip_held_while_remaster_running(self, logger) -> None:
+        """export_clips must not dispatch on the GPU lane while a _remaster runs."""
+        q = _make_queue(logger)
+        observed = {}
+        self._enqueue_clip(q)
+        # The remaster's python_fn samples the GPU lane mid-run.
+        self._enqueue_remaster(
+            q, lambda: observed.__setitem__('during', q.next_runnable(JobCategory.GPU_BOUND))
+        )
+
+        q.dispatch_one(JobCategory.MANUAL)
+        assert observed['during'] is None  # clip gated out while remaster ran
+
+        # Remaster finished — clip is now runnable.
+        runnable = q.next_runnable(JobCategory.GPU_BOUND)
+        assert runnable is not None
+        assert runnable.job.kind == 'export_clips'
+
+    def test_non_clip_gpu_job_not_gated_by_remaster(self, logger) -> None:
+        """The gate is targeted: a non-sensitive GPU job runs despite a remaster."""
+        q = _make_queue(logger)
+        observed = {}
+        encode = PipelineJob(kind='encode_quads', label='encode', priority=10)
+        q.enqueue(
+            JobManifest(
+                performance_key='26-04-12_TEST',
+                jobs=[encode],
+                python_fns={encode.job_id: lambda: None},
+            ),
+            JobCategory.GPU_BOUND,
+        )
+        self._enqueue_remaster(
+            q, lambda: observed.__setitem__('during', q.next_runnable(JobCategory.GPU_BOUND))
+        )
+
+        q.dispatch_one(JobCategory.MANUAL)
+        assert observed['during'] is not None
+        assert observed['during'].job.kind == 'encode_quads'
+
+    def test_clip_runs_when_no_remaster(self, logger) -> None:
+        """With no remaster running, a clip job dispatches normally."""
+        q = _make_queue(logger)
+        self._enqueue_clip(q)
+        runnable = q.next_runnable(JobCategory.GPU_BOUND)
+        assert runnable is not None
+        assert runnable.job.kind == 'export_clips'
+
+
+# ---------------------------------------------------------------------------
 # TestQueueStatus
 # ---------------------------------------------------------------------------
 

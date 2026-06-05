@@ -168,6 +168,40 @@ def _load_mono(path: Path, start_sec: float = 0.0, duration_sec: float | None = 
     return audio, sr
 
 
+def _channel_is_silent(path: Path, start_sec: float = 0.0,
+                       duration_sec: float | None = None) -> bool:
+    """True if a channel reads as dead/silent (mean RMS < DEAD_RMS_DB).
+
+    Lets a present-but-silent room mic (e.g. an unplugged input still recorded
+    as a near-zero track) be treated the same as an absent one. When no window
+    is given, samples a 60 s mid-file window so a quiet intro/outro is not
+    mistaken for a dead channel.
+    """
+    import soundfile as sf
+    from nofun.mastering_meta import DEAD_RMS_DB
+    try:
+        info = sf.info(str(path))
+    except Exception:
+        return False
+    sr = info.samplerate
+    if duration_sec is not None:
+        start = max(0, int(start_sec * sr))
+        stop = start + int(duration_sec * sr)
+    else:
+        total = info.frames
+        win = min(total, int(60.0 * sr))
+        start = max(0, (total - win) // 2)
+        stop = start + win
+    try:
+        audio, _ = sf.read(str(path), start=start, stop=stop,
+                           dtype='float32', always_2d=False)
+    except Exception:
+        return False
+    a = audio.astype(np.float64)
+    rms = float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+    return 20.0 * math.log10(rms + 1e-12) < DEAD_RMS_DB
+
+
 def _write_stereo(path: Path, left: np.ndarray, right: np.ndarray, sr: int) -> None:
     """Write a stereo 32-bit float WAV file."""
     import soundfile as sf
@@ -1222,10 +1256,30 @@ def generate_masters(
         f'MASTER  {len(channels)} channels found, using {available_selected}'
     )
 
-    # Dynamic panning: room L (ch29) falls back to centre mono when room R (ch30) absent
+    # Room-mic handling (decision 2026-06-03):
+    #   both room mics live → normal hard L/R pan;
+    #   exactly one live    → centre it (mono) and omit the dead/absent partner;
+    #   none live           → omit room entirely, mix house stereo (board 31/32) only.
+    # "Live" = present AND not silent, so an unplugged-but-recorded room mic
+    # (reads ~-90 dB) is treated as absent rather than panned hard to one side.
+    _win_start = clip[0] if clip else 0.0
+    _win_dur = (clip[1] - clip[0]) if clip else None
+    live_room = [c for c in ROOM_CHANNELS
+                 if c in available_selected
+                 and not _channel_is_silent(channels[c], _win_start, _win_dur)]
+    dead_room = [c for c in ROOM_CHANNELS
+                 if c in selected_ch_list and c not in live_room]
+    if dead_room:
+        selected_ch_list = [c for c in selected_ch_list if c not in dead_room]
+        available_selected = [c for c in available_selected if c not in dead_room]
+        log.info(
+            'MASTER  room ch%s dead/absent -> %s'
+            % (dead_room, 'centring single room mic' if live_room else 'house stereo only'),
+            extra={'tui': False})
+
     effective_pans = dict(SELECTED_PANS)
-    if 29 in available_selected and 30 not in available_selected:
-        effective_pans[29] = 0.0
+    if len(live_room) == 1:
+        effective_pans[live_room[0]] = 0.0  # single room mic → centre (mono)
     # Extra channels default to centre
     if extra_ch_gains:
         for ch in extra_ch_gains:

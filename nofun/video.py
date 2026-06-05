@@ -401,10 +401,13 @@ class VideoMixin:
                 self.logger.debug(f"SKIP    {base} clips (complete)")
                 return
 
-            per_quad_start = {q: c + 1 for q, c in counts.items() if c < top}
-            resuming = [f'{q} from {c + 1}' for q, c in counts.items() if 0 < c < top]
+            # Walk incomplete quads from clip 1; the export script skips clips
+            # already on disk, so this backfills interior gaps (e.g. missing 1-6)
+            # instead of only resuming the tail past the existing count.
+            per_quad_start = {q: 1 for q, c in counts.items() if c < top}
+            resuming = [f'{q} ({c}/{top})' for q, c in counts.items() if 0 < c < top]
             if resuming:
-                self.logger.info(f"RESUME  {base} clips ({', '.join(resuming)})")
+                self.logger.info(f"BACKFILL {base} clips ({', '.join(resuming)})")
 
         clips_dir.mkdir(parents=True, exist_ok=True)
         self.logger.info(f"CLIPS   {base}")

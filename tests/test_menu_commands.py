@@ -80,6 +80,7 @@ class _FakePipeline(Pipeline):
         self._rename_thread        = None
         self._disk_c               = ''
         self._disk_d               = ''
+        self._disk_n               = ''
         self._disk_sp              = ''
         self._stream_states:  list = []
 

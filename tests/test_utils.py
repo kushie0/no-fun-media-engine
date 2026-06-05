@@ -9,7 +9,7 @@ import unittest.mock as mock
 import pytest
 
 from nofun.media_io import DeleteQueue, fmt_size, is_file_locked, run_ffmpeg
-from nofun.paths    import detect_clips_root, detect_platform, detect_mounts
+from nofun.paths    import detect_clips_root, detect_media_root, detect_platform, detect_mounts
 
 
 class TestDetectClipsRoot:
@@ -24,6 +24,20 @@ class TestDetectClipsRoot:
     def test_empty_env_var_falls_back(self, monkeypatch):
         monkeypatch.setenv('CLIPS_ROOT', '')
         assert detect_clips_root(pathlib.Path('/d')) == pathlib.Path('/d/clips')
+
+
+class TestDetectMediaRoot:
+    def test_unset_falls_back_to_mount_d(self, monkeypatch):
+        monkeypatch.delenv('NAS_ROOT', raising=False)
+        assert detect_media_root(pathlib.Path('/d')) == pathlib.Path('/d')
+
+    def test_existing_dir_is_used(self, monkeypatch, tmp_path):
+        monkeypatch.setenv('NAS_ROOT', str(tmp_path))
+        assert detect_media_root(pathlib.Path('/d')) == tmp_path
+
+    def test_nonexistent_path_falls_back(self, monkeypatch, tmp_path):
+        monkeypatch.setenv('NAS_ROOT', str(tmp_path / 'does_not_exist'))
+        assert detect_media_root(pathlib.Path('/d')) == pathlib.Path('/d')
 
 
 class TestFmtSize:

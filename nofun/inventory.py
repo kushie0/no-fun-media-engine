@@ -18,7 +18,7 @@ __all__ = [
 
 # Age thresholds (days from recording date)
 EXPIRE_AGE     = 28   # cloud lease length; sync stops at this age, expiry deletes after
-RAW_EXPIRE_AGE = 5    # delete local raw video + audio after this many days
+RAW_EXPIRE_AGE = 14   # delete local raw video + audio after this many days
 
 import concurrent.futures
 import dataclasses
@@ -167,6 +167,28 @@ def perf_key(date: str, band: str) -> str:
     """Canonical performance identity: '<YY-MM-DD>_<band>'. The single source of
     truth for the DB key, ZIP stem, reconciler key, and status map."""
     return f'{short_date(date)}_{band}'
+
+
+def files_for_perf(
+    directory: pathlib.Path, suffix: str, perf: str
+) -> list[pathlib.Path]:
+    """Files in ``directory`` ending with ``suffix`` whose normalised
+    ``(date, band)`` identity equals ``perf``.
+
+    A literal-prefix glob (``{perf}*{suffix}``) misses outputs whose on-disk band
+    spelling differs from the canonical perf key — e.g. a multi-band recording
+    encoded as ``26-05-13_B hvpie.25_CAM1.mp4`` (space + session suffix) when the
+    perf key is ``26-05-13_B_hvpie``. Matching on the same normalisation the perf
+    key itself uses tolerates that gap, so a perf→files lookup stays in sync with
+    the audio pipeline (which already writes the normalised name)."""
+    if not directory.is_dir():
+        return []
+    matches = []
+    for f in directory.glob(f'*{suffix}'):
+        date, band = extract_date_band(f.stem)
+        if date != 'TBD' and perf_key(date, band) == perf:
+            matches.append(f)
+    return sorted(matches)
 
 
 # ---------------------------------------------------------------------------

@@ -38,9 +38,11 @@ from nofun.menu_streams import StreamsMenuMixin
 from nofun.video import VideoMixin, build_encoder_config
 from nofun.paths import (
     detect_clips_root,
+    detect_media_root,
     detect_mounts,
     detect_platform,
     is_windows,
+    nas_reachable,
 )
 from nofun.media_io import (
     DeleteQueue,
@@ -63,13 +65,15 @@ from nofun.cleanup import (
 )
 from nofun.encoding_db import EncodingDB
 from nofun.inventory import (
-    EXPIRE_AGE, RAW_EXPIRE_AGE, extract_date_band, perf_key, short_date,
-    _status_label, _STATUS_ICON,
+    EXPIRE_AGE, RAW_EXPIRE_AGE, extract_date_band, files_for_perf, perf_key,
+    short_date, _status_label, _STATUS_ICON,
 )
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory, JobQueue
 from nofun.state import MenuMode, PauseState
 from nofun.video import CAM_LABELS
+from nofun.multiplex import Layout, detect_layout, route_by_layout
+from nofun.backup_mirror import mirror_deliverables
 from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
 
 # ---------------------------------------------------------------------------
@@ -122,6 +126,11 @@ class _HelpState:
 class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                InventoryMenuMixin, StreamsMenuMixin,
                JobsMenuMixin, ReprocessMenuMixin):
+    # Runtime NAS→D: fallback: number of consecutive agreeing reachability
+    # probes required before flipping media_root. At 60s/tick this is ≤120s of
+    # hysteresis, so a brief NAS blip won't thrash the dest paths.
+    _NAS_FLIP_TICKS = 2
+
     def __init__(
         self,
         directory:        pathlib.Path | None,
@@ -151,23 +160,26 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self.search_dir: pathlib.Path = directory if directory else default_source
 
         # Destinations
+        # clips_dest is separate (C:\clips SSD) and never follows media_root —
+        # set once here and left untouched by any runtime NAS→D: re-point.
         prefix = 'trial_runs' if trial_run else ''
         if prefix:
-            self.vids_dest     = self.mount_d / prefix / 'videos'
-            self.clips_dest    = self.mount_d / prefix / 'clips'
-            self.audio_dest    = self.mount_d / prefix / 'audio'
-            self.video_archive = self.mount_d / prefix / 'video_archive'
-            self.audio_archive = self.mount_d / prefix / 'audio_archive'
+            self.clips_dest = self.mount_d / prefix / 'clips'
+            self._set_media_root(self.mount_d / prefix)
         else:
-            self.vids_dest     = self.mount_d / 'videos'
-            self.clips_dest    = detect_clips_root(self.mount_d)
-            self.audio_dest    = self.mount_d / 'audio'
-            self.video_archive = self.mount_d / 'video_archive'
-            self.audio_archive = self.mount_d / 'audio_archive'
+            self.clips_dest = detect_clips_root(self.mount_d)   # unchanged — C:\clips SSD
+            self._set_media_root(detect_media_root(self.mount_d))
 
         for d in (self.vids_dest, self.clips_dest, self.audio_dest,
                   self.video_archive, self.audio_archive):
             d.mkdir(parents=True, exist_ok=True)
+
+        # Runtime NAS→D: fallback debounce state (see _reconcile_media_root).
+        # Each main-loop tick re-probes NAS reachability; flip media_root only
+        # after _NAS_FLIP_TICKS consecutive agreeing probes so a flapping link
+        # can't thrash the dest paths.
+        self._nas_miss = 0
+        self._nas_hit  = 0
 
         # SharePoint / OneDrive sync folder (copy-only; OneDrive syncs automatically)
         _od = (self.mount_c / 'Users' / (os.environ.get('USERNAME') or os.environ.get('USER') or 'nofun')
@@ -188,7 +200,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         )
         self.logger.debug(
             f"Pipeline started  v={version} plat={detect_platform()} "
-            f"mount_c={self.mount_c} mount_d={self.mount_d} "
+            f"mount_c={self.mount_c} mount_d={self.mount_d} media_root={self.media_root} "
             f"trial={trial_run}s skip_audio={skip_audio}"
         )
 
@@ -249,6 +261,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._show_groups:         list            = []   # [(date, show_name, [ps,...]), ...]
         self._disk_c:              str             = ''
         self._disk_d:              str             = ''
+        self._disk_n:              str             = ''
         self._disk_sp:             str             = ''
         self._status_expanded_key: str | None      = None  # date string, or None
         # RENAME sub-state (active while _active_menu == MenuMode.STATUS)
@@ -293,6 +306,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # Dedup: perf keys with active manifests; prevents re-enqueue each loop
         self._enqueued_keys:      set[str]       = set()
         self._enqueued_keys_lock: threading.Lock = threading.Lock()
+        # Cache of content-detected mov layouts, keyed on str(path) →
+        # ((path, mtime_ns, size), Layout); avoids re-probing on every loop.
+        self._layout_cache: dict[str, tuple] = {}
         # Perfs where the DB audio_all_silent flag has already been logged this session
         self._audio_silent_notified: set[str] = set()
         # Per-perf REMASTER outcome; read by _do_reel_for_perf to compose upstream-cause warning.
@@ -387,11 +403,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             paths.append(self.search_dir)           # VenueLighting source
             if self.sharepoint_dest:
                 paths.append(self.sharepoint_dest)  # OneDrive Multitracks
-        if self.mount_d.is_dir():
-            for sub in ('videos', 'audio', 'clips', 'video_archive', 'audio_archive'):
-                p = self.mount_d / sub
-                if p.is_dir():
-                    paths.append(p)
+        for p in (self.vids_dest, self.audio_dest, self.clips_dest,
+                  self.video_archive, self.audio_archive):
+            if p.is_dir():
+                paths.append(p)
         return paths or [pathlib.Path('./VenueLighting')]
 
     def _run_inventory(self) -> None:
@@ -569,6 +584,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
         self._disk_c  = f"C: {_fmt_disk(self.mount_c)}" if self.mount_c != pathlib.Path('.') else ''
         self._disk_d  = f"D: {_fmt_disk(self.mount_d)}" if self.mount_d.is_dir() else ''
+        self._disk_n  = (f"NAS: {_fmt_disk(self.media_root)}"
+                         if self.media_root != self.mount_d else '')
         self._disk_sp = _sp_size(self.sharepoint_dest)
 
     def _maybe_refresh_inventory(self) -> None:
@@ -1202,7 +1219,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 continue
             perf    = perf_key(date, band)
             audio   = self.audio_dest / f'{perf}_AUDIO.mp3'
-            reel_ok = any(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
+            reel_ok = bool(files_for_perf(self.vids_dest, '_INSTAGRAM.mp4', perf))
             if audio.exists() and reel_ok:
                 continue
             # Ask the live queue, not a pre-loop snapshot: two status rows can
@@ -1227,6 +1244,25 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             queued += 1
         if queued:
             self.logger.info(f'FINISH  queued {queued} incomplete show(s)')
+
+    def _mirror_deliverables_to_backup(self) -> None:
+        """Mirror finished .mp4/.mp3 deliverables from the NAS down to local D:.
+
+        Backup tier: if the NAS dies, the finished cuts still exist locally. The
+        heavy raw/intermediate tiers (.mov/.wav/.zip) are NAS-only and excluded
+        by extension. No-op unless the NAS is the active root — on D: fallback or
+        a trial run, media_root == mount_d and there is nothing to mirror.
+        """
+        if self.media_root == self.mount_d:
+            return
+        pairs = [
+            (self.vids_dest,  self.mount_d / 'videos'),
+            (self.audio_dest, self.mount_d / 'audio'),
+        ]
+        copied, skipped = mirror_deliverables(pairs)
+        if copied:
+            self.logger.info(
+                f'BACKUP MIRROR  {copied} deliverable(s) → D: ({skipped} already current)')
 
     # -----------------------------------------------------------------------
     # Trial summary
@@ -1719,9 +1755,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
     # Each entry: (command, brief_one_liner, [detailed_lines...])
     _HOME_HELP: list[tuple[str, str, list[str]]] = [
-        ('NOPROBLEM', 'Bypass the 4pm–midnight processing gate (again = force re-encode)', [
-            'The pipeline avoids processing between 4 pm and midnight to avoid',
-            'interfering with shows. NOPROBLEM bypasses that gate immediately.',
+        ('NOPROBLEM', 'Process now — bypass the 4pm–midnight no-processing window (again = force re-encode)', [
+            'Heavy jobs run only midnight–4pm; the pipeline deliberately does NOT',
+            'process between 4 pm and midnight, to avoid interfering with shows.',
+            'NOPROBLEM lifts that block immediately so jobs dispatch right now.',
             'Second NOPROBLEM also sets force=True: normally the pipeline skips a',
             '.mov whose four quadrant .mp4s already exist in vids_dest; force clears',
             'that check and re-encodes from scratch. Both flags reset at midnight.',
@@ -2715,7 +2752,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
 
         # Collect all CAM1 quad files; each represents a separate session.
-        ul_candidates = sorted(self.vids_dest.glob(f'{base}*_CAM1.mp4'))
+        # Match on normalised perf identity, not a literal prefix, so quads
+        # encoded under a non-canonical band spelling (e.g. a space + session
+        # suffix) are still found — see files_for_perf.
+        ul_candidates = files_for_perf(self.vids_dest, '_CAM1.mp4', base)
         if not ul_candidates:
             self.logger.warning(f"REEL  skipped for {base} — no CAM1 quad found")
             return
@@ -2777,6 +2817,38 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         """Copy the Instagram reel MP4(s) for perf to SharePoint."""
         reel_files = list(self.vids_dest.glob(f'{perf}*_INSTAGRAM.mp4'))
         self._sync_perf_files(perf, reel_files)
+
+    def _detect_layout_cached(self, mov: pathlib.Path) -> 'Layout':
+        """Content-detect a mov's camera layout, cached on (path, mtime, size).
+
+        Short-circuits to UNKNOWN when outputs already exist — routing is moot
+        for an already-encoded mov, and this bounds the ffmpeg cost to genuinely
+        new, unprocessed arrivals.
+        """
+        base = mov.stem
+        if (self.vids_dest / f'{base}.mp4').exists() or all(
+            (self.vids_dest / f'{base}_{q}.mp4').exists() for q in CAM_LABELS
+        ):
+            return Layout.UNKNOWN
+        try:
+            st = mov.stat()
+            ckey = (str(mov), st.st_mtime_ns, st.st_size)
+        except OSError:
+            return Layout.UNKNOWN
+        cached = self._layout_cache.get(str(mov))
+        if cached is not None and cached[0] == ckey:
+            return cached[1]
+        layout = detect_layout(mov, logger=self.logger)
+        self._layout_cache[str(mov)] = (ckey, layout)
+        return layout
+
+    def _route_movs_by_layout(
+        self,
+        perf_mov: 'dict[str, list[pathlib.Path]]',
+        perf_singles: 'dict[str, list[pathlib.Path]]',
+    ) -> None:
+        """Move main-path movs that content-detect as non-quad into the singles map."""
+        route_by_layout(perf_mov, perf_singles, self._detect_layout_cached, self.logger)
 
     def _build_full_manifest(
         self,
@@ -2876,12 +2948,15 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
         # --- 3. Export clips (GPU_BOUND, priority=30, depends on encode) ---
         if encode_ids:
-            _clips_done = all(
+            # Clips are "done" only when every mov already has a clips dir with
+            # outputs. Do NOT filter movs by whether their quads exist yet: on a
+            # combined rebuild the quads are absent at build time, which would make
+            # this generator empty and `all([])` vacuously True — silently skipping
+            # clips. Ordering is handled by depends=encode_ids, not by this check.
+            _clips_done = bool(mov_list) and all(
                 (self.clips_dest / mov.stem).is_dir()
                 and any((self.clips_dest / mov.stem).glob('*.mp4'))
                 for mov in mov_list
-                if all((self.vids_dest / f'{mov.stem}_{q}.mp4').exists()
-                       for q in CAM_LABELS)
             )
             if not (_clips_done and not self.force):
                 job = _ScriptJob(
@@ -3045,6 +3120,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
           EXPIRE RAW FILES    — 3600s  (1 hr)
           DEHYDRATE SWEEP     — 14400s (4 hr)
           FINISH INCOMPLETE   — 3600s  (1 hr)
+          BACKUP MIRROR       — 3600s  (1 hr) — N: .mp4/.mp3 deliverables → local D:
           AUTO SCAN           — 3600s  (1 hr)
           AUTO CLEANUP        — 21600s (6 hr) — multi-job manifest, deduped by manifest key
         """
@@ -3060,6 +3136,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             ('EXPIRE RAW FILES',    '_expire_raw',   self._auto_expire_raw_files,      3600.0),
             ('DEHYDRATE SWEEP',     '_dehydrate',    self._dehydration_sweep,         14400.0),
             ('FINISH INCOMPLETE',   '_finish',       self._finish_incomplete_shows,    3600.0),
+            ('BACKUP MIRROR',       '_backup_mirror', self._mirror_deliverables_to_backup, 3600.0),
         ]
         for label, kind, fn, interval in tasks:
             last = self._last_scheduled_enqueued.get(label, 0.0)
@@ -3138,6 +3215,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._override_time = False
 
         while True:
+            # Re-check NAS reachability and re-point media_root before anything
+            # globs sources or builds manifests this tick — so a mid-run NAS drop
+            # routes new outputs to D: (and a return routes them back to N:).
+            self._reconcile_media_root()
+
             mov_files = sorted(self.search_dir.glob('*.mov'))
             wav_files = sorted(self.search_dir.glob('*.wav'))
 
@@ -3206,6 +3288,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 if _singles_dir.is_dir():
                     for mov in sorted(_singles_dir.glob('*.mov')):
                         perf_singles[self._perf_key(mov)].append(mov)
+
+                # Content-route main-path movs: a 1×1 source detected here is
+                # diverted to single-transcode instead of being quad-split into
+                # four garbage cameras.  Singles/ folder entries are untouched.
+                self._route_movs_by_layout(perf_mov, perf_singles)
 
                 all_perfs = sorted(
                     set(list(perf_ch) + list(perf_sd) + list(perf_au)
@@ -3330,6 +3417,84 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self.logger.info("Pipeline stopped")  # noqa: unreachable (loop exits via sys.exit)
 
     # -----------------------------------------------------------------------
+    # Runtime media-root fallback (NAS↔D:)
+    # -----------------------------------------------------------------------
+
+    def _set_media_root(self, root: pathlib.Path) -> None:
+        """Point media_root and its four derived dests at ``root`` atomically.
+
+        Every NAS↔D: re-point goes through here so the five attributes can never
+        drift out of sync. ``clips_dest`` is deliberately NOT touched — clips live
+        on the C: SSD and never follow the NAS.
+        """
+        self.media_root    = root
+        self.vids_dest     = root / 'videos'
+        self.audio_dest    = root / 'audio'
+        self.video_archive = root / 'video_archive'
+        self.audio_archive = root / 'audio_archive'
+        for d in (self.vids_dest, self.audio_dest,
+                  self.video_archive, self.audio_archive):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def _reconcile_media_root(self) -> None:
+        """Re-probe NAS reachability each loop tick; re-point media_root on change.
+
+        Debounced: only flip after _NAS_FLIP_TICKS consecutive agreeing probes so
+        a flapping link can't thrash the dest paths. No-op for trial runs or when
+        NAS_ROOT is unset (no NAS configured — already on local D:).
+        """
+        nas = os.environ.get('NAS_ROOT')
+        if not nas or self.trial_run:
+            return
+        nas_root = pathlib.Path(nas)
+        up = nas_reachable(nas_root)
+        on_nas = (self.media_root != self.mount_d)
+        if on_nas and not up:                       # NAS just went away
+            self._nas_miss += 1
+            self._nas_hit = 0
+            if self._nas_miss >= self._NAS_FLIP_TICKS:
+                self.logger.warning(
+                    f'NAS unreachable — FALLING BACK to {self.mount_d}')
+                self._set_media_root(self.mount_d)
+                self._nas_miss = 0
+        elif (not on_nas) and up:                   # NAS came back
+            self._nas_hit += 1
+            self._nas_miss = 0
+            if self._nas_hit >= self._NAS_FLIP_TICKS:
+                self.logger.warning(
+                    f'NAS back — RESUMING {nas_root}; reconciling D:→N:')
+                self._set_media_root(nas_root)
+                self._nas_hit = 0
+                self._enqueue_failback_reconcile(nas_root)
+        else:                                       # steady state — reset counters
+            self._nas_miss = 0
+            self._nas_hit = 0
+
+    def _enqueue_failback_reconcile(self, nas_root: pathlib.Path) -> None:
+        """Catch up deliverables written to D: during a NAS outage, back up to N:.
+
+        Inverse of _mirror_deliverables_to_backup: copy-only D:→N: so anything
+        produced while the NAS was down lands on the primary, while N:-only files
+        survive untouched. Runs on the scheduled worker so it never blocks the
+        main loop.
+        """
+        pairs = [
+            (self.mount_d / 'videos',        nas_root / 'videos'),
+            (self.mount_d / 'audio',         nas_root / 'audio'),
+            (self.mount_d / 'video_archive', nas_root / 'video_archive'),
+            (self.mount_d / 'audio_archive', nas_root / 'audio_archive'),
+        ]
+
+        def _reconcile() -> None:
+            copied, skipped = mirror_deliverables(pairs)
+            self.logger.info(
+                f'FAILBACK RECONCILE  {copied} deliverable(s) D:→N: '
+                f'({skipped} already current)')
+
+        threading.Thread(target=_reconcile, daemon=True,
+                         name='failback-reconcile').start()
+
+    # -----------------------------------------------------------------------
     # Main run loop
     # -----------------------------------------------------------------------
 
@@ -3361,6 +3526,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         override_time = False
 
         while True:
+            # Re-check NAS reachability and re-point media_root before anything
+            # globs sources or builds manifests this tick — so a mid-run NAS drop
+            # routes new outputs to D: (and a return routes them back to N:).
+            self._reconcile_media_root()
+
             mov_files = sorted(self.search_dir.glob('*.mov'))
             wav_files = sorted(self.search_dir.glob('*.wav'))
 
@@ -3426,6 +3596,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 if _singles_dir.is_dir():
                     for mov in sorted(_singles_dir.glob('*.mov')):
                         perf_singles[self._perf_key(mov)].append(mov)
+
+                # Content-route main-path movs: a 1×1 source detected here is
+                # diverted to single-transcode instead of being quad-split into
+                # four garbage cameras.  Singles/ folder entries are untouched.
+                self._route_movs_by_layout(perf_mov, perf_singles)
 
                 all_perfs = sorted(
                     set(list(perf_ch) + list(perf_sd) + list(perf_au)

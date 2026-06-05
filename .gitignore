@@ -1,3 +1,6 @@
+# OS detritus
+.DS_Store
+
 # Python
 *.pyc
 **/__pycache__/
@@ -32,3 +35,4 @@ trial_runs/
 docs/active/
 docs/guides/ssh-workflow.md
 bin/
+scratch/

@@ -61,6 +61,15 @@ def _export_quad_clips(
     dry_run_temps: list[str] = []
 
     for n in range(start_n, n_clips + 1):
+        final = clips_dir / f'{base}_{quad}_{n}.mp4'
+        if final.exists():
+            # Already present — skip (idempotent backfill: only encode the gaps).
+            with done_lock:
+                done_counter[0] += 1
+                done = done_counter[0]
+            sys.stderr.write(f'clip_progress={done}/{total_clips}\n')
+            sys.stderr.flush()
+            continue
         start = (n - 1) * step
         out   = temp_dir / f'{base}_{quad}_temp_{n}.mp4'
 

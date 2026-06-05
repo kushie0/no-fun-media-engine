@@ -707,14 +707,16 @@ class DeleteQueue:
         """
         failed: list[tuple[pathlib.Path, str]] = []
         for path, reason in self.items:
-            if not path.exists():
-                continue
-            if pipeline_moved is not None:
-                pipeline_moved.put(str(path))
             try:
+                if not path.exists():
+                    continue
+                if pipeline_moved is not None:
+                    pipeline_moved.put(str(path))
                 path.unlink()
                 logger.info(f"DELETE  {path.name}")
             except OSError as e:
+                # Any per-file OSError (locked, or a NAS stat raising WinError 5
+                # Access denied) must not kill the worker thread — leave it queued.
                 logger.warning(f"DELETE  {path.name} — locked, will retry next loop ({e})")
                 failed.append((path, reason))
         deleted = len(self.items) - len(failed)

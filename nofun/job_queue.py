@@ -71,6 +71,15 @@ class ScheduleRule:
 # MANUAL (remaster, reel, reprocess) respects the same gate as GPU/CPU.
 _ENCODE_END_HOUR = 16   # heavy-job window ends at 16:00 (exclusive)
 
+# Cross-lane CPU-starvation gate.  An `export_clips` GPU job still runs its
+# h264 decode + lanczos-scale stages on the CPU; a `_remaster` MANUAL job
+# spawns 32-channel afftdn passes that peg every core.  Run on their separate
+# worker threads at once and the clip ffmpeg stalls past its 90 s per-clip
+# timeout (observed 2026-06-01, perf 26-05-31_RETAIL_DRUGS.2).  Hold clips
+# until the remaster finishes — it's the shorter wait and clips are idempotent.
+_CPU_SENSITIVE_KINDS = frozenset({'export_clips'})
+_CPU_HEAVY_KINDS     = frozenset({'_remaster'})
+
 DEFAULT_SCHEDULE: list[ScheduleRule] = [
     ScheduleRule('encode_window', start_hour=0, end_hour=_ENCODE_END_HOUR, category=JobCategory.GPU_BOUND),
     ScheduleRule('gpu_window',    start_hour=0, end_hour=_ENCODE_END_HOUR, category=JobCategory.GPU_BOUND),
@@ -197,12 +206,18 @@ class JobQueue:
             done_ids = {qj.job_id for qj in self._history if qj.status == 'done'}
             # Also treat cancelled deps as satisfied so independent jobs aren't blocked
             done_ids |= {qj.job_id for qj in self._history if qj.status == 'cancelled'}
+            # Cross-lane gate: while a CPU-heavy job runs, hold CPU-sensitive jobs.
+            heavy_running = any(
+                qj.status == 'running' and qj.job.kind in _CPU_HEAVY_KINDS
+                for qj in self._queue
+            )
             candidates = [
                 qj for qj in self._queue
                 if qj.status == 'pending'
                 and (category is None or qj.category == category)
                 and all(dep in done_ids for dep in qj.job.depends)
                 and (qj.retry_after is None or time.time() >= qj.retry_after)
+                and not (heavy_running and qj.job.kind in _CPU_SENSITIVE_KINDS)
             ]
         if not candidates:
             return None

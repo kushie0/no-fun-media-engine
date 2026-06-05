@@ -428,11 +428,12 @@ class TestExportClips:
         assert fp._script_runner.run.call_count == 1
 
     def test_resume_passes_per_quad_start(self, tmp_path):
-        """Partial clips: per_quad_start reflects correct resume index."""
+        """Incomplete quad walks from clip 1 so the export script can backfill gaps."""
         import json
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        # CAM1 has 2 clips, CAM2 has 5 — CAM1 is behind, should resume from 3
+        # CAM1 has 2 clips, CAM2 has 5 — CAM1 is behind; it should walk from 1
+        # (the script skips clips already on disk), not resume past the count.
         for q in ('CAM1', 'CAM2'):
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
@@ -456,7 +457,43 @@ class TestExportClips:
 
         assert captured
         pqs = json.loads(captured[0]['per_quad_start'])
-        assert pqs == {'CAM1': 3}  # CAM2 complete (top=5), CAM1 has 2 → resume from 3
+        # CAM2 complete (top=5) → excluded; CAM1 incomplete → walks from 1, not 3.
+        assert pqs == {'CAM1': 1}
+
+    def test_resume_backfills_interior_gap(self, tmp_path):
+        """A non-tail gap (missing clips 1-2, has 3-5) still walks from 1 so the
+        gap gets backfilled — the old resume-by-count logic restarted past the
+        count and never refilled early gaps."""
+        import json
+        fp   = _FakePipeline(tmp_path)
+        base = self._BASE
+        for q in ('CAM1', 'CAM2'):
+            _make_quad(fp, base, q)
+        clips_dir = fp.clips_dest / base
+        clips_dir.mkdir()
+        # CAM1 is missing clips 1 and 2 but has 3,4,5 (count=3, interior gap).
+        for i in range(3, 6):
+            (clips_dir / f'{base}_CAM1_{i}.mp4').write_bytes(b'\x00')
+        for i in range(1, 6):
+            (clips_dir / f'{base}_CAM2_{i}.mp4').write_bytes(b'\x00')
+
+        captured: list = []
+        def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
+            captured.append(job.args)
+            return ScriptResult(
+                script='export_clips', exit_code=0,
+                stdout_json={'quads': [{'quad': 'CAM1', 'status': 'ok', 'moved_count': 2}]},
+                stderr_tail='', elapsed=0.0,
+            )
+
+        fp._script_runner.run.side_effect = _fake_run
+        fp._export_clips(base)
+
+        assert captured
+        pqs = json.loads(captured[0]['per_quad_start'])
+        # Must be 1 (not 4): walking from 1 lets the script's skip-existing
+        # backfill the missing 1-2 while skipping the present 3-5.
+        assert pqs == {'CAM1': 1}
 
     def test_skip_when_all_quads_complete(self, tmp_path):
         """All quads at same count → skip without calling runner."""

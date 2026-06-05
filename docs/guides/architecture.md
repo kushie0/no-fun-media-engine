@@ -24,19 +24,25 @@ do not call `super().__init__`.
 
 ```
 VenueLighting/
-  ├── YYYYMMDD_Band.MOV  ──► _process_mov()
-  │                            ├── _encode_quadrants()  → D:\videos\YYYYMMDD_Band_{UL,UR,LL,LR}.mp4
-  │                            └── _export_clips()      → D:\clips\YYYYMMDD_Band\*.mp4
+  ├── YY-MM-DD_Band.N.mov  ──► _process_mov()
+  │                             ├── _encode_quadrants()  → D:\videos\YY-MM-DD_Band_CAM1..CAM4.mp4
+  │                             └── _export_clips()      → D:\clips\YY-MM-DD_Band\*.mp4
   │
-  ├── Audio/             ──► _process_audio_dir_wavs()    [primary, going-forward]
-  │   └── YY-M-D_Band_chan7.3.wav   (~32 pre-separated single-channel WAVs from hardware)
-  │                                                       │
-  │                                                       ├─► _group_wav_files()
-  │                                                       └─► _export_audio_zips()  → D:\audio\<base>.zip
+  ├── YY-MM-DD_Band_chanNN.0.wav   ──► _collect_chan_candidates(root) → _process_audio_group()   [PRIMARY]
+  │     (~32 pre-separated single-channel WAVs from hardware, in the VenueLighting root)
+  │        ├─► silence-drop — channels < MIN_ACTIVE_SECONDS are dropped from the ZIP
+  │        ├─► _zip_wav_group()  → D:\audio\YY-MM-DD_Band_MULTITRACK.zip   (active channels)
+  │        └─► all 32 channels retained in D:\audio_archive\ (silent AND active — on_success='archive')
   │
-  └── YYYYMMDD_Band.wav  ──► _split_multichannel_wavs()    [legacy, only old recordings]
-      (single multi-ch file)    └── pan filters → YYYYMMDD_Band_ch01.wav … → ZIP
+  ├── Audio/  subfolder  ──► _collect_chan_candidates(Audio/)   [DEPRECATED — still scanned, no longer fed]
+  │
+  └── YY-MM-DD_Band.wav  ──► _split_multichannel_wavs()    [LEGACY — one multi-ch file, old recordings only]
+      (single multi-ch file)    └── pan filters → YY-MM-DD_Band_ch01.wav … → ZIP
 ```
+
+Note the `_chanNN` per-channel inputs are **not** the `_chNN` split outputs: they do not match the
+`_ch\d+\.wav$` split regex (`nofun/audio.py`), so the primary path treats them as ordinary
+single-channel WAVs and never invokes `_split_multichannel_wavs`.
 
 ## Prod filesystem layout (`D:\`)
 
@@ -47,7 +53,7 @@ via named attributes set in `Pipeline.__init__` (`media_engine.py`).
 |---|---|---|
 | `D:\videos\` | `vids_dest` | Encoded quadrant MP4s — output of `_encode_quadrants()` |
 | `D:\audio\` | `audio_dest` | Audio ZIP archives — output of `_export_audio_zips()` |
-| `D:\audio_archive\` | `audio_archive` | Split per-channel WAVs after processing; original multichannel WAVs after split. Cleaned up (deleted) once the corresponding ZIP exists in `D:\audio\` and age > `RAW_EXPIRE_AGE`. |
+| `D:\audio_archive\` | `audio_archive` | All ~32 per-channel input WAVs after processing — both silent and zipped-active channels (primary path). For legacy multichannel recordings, the split outputs + original land here too. Cleaned up (deleted) once the corresponding ZIP exists in `D:\audio\` and age > `RAW_EXPIRE_AGE`. |
 | `D:\video_archive\` | `video_archive` | Source `.mov` files archived here after encoding. Cleaned up once ≥4 quad files exist and age > `RAW_EXPIRE_AGE`. |
 | `D:\clips\` | (via `paths.py`) | Short clip thumbnails — output of `_export_clips()`. |
 | `D:\logs\` | — | Rolling log files (`RemoteRotatingHandler`, 800 KB rotation per file). |
@@ -72,6 +78,32 @@ RUNNING ◄──RESUME───────────────────
   to `mount_d/hard_paused/`. The PAUSED transition happens at the end of the watchdog
   loop iteration (not in `_handle_command`).
 - **PAUSED**: watchdog loop is idle, waiting for RESUME.
+
+## Dispatch schedule (time-of-day gate)
+
+Heavy work is **time-gated to stay out of the live-show window.** Read the direction
+carefully — it is the inverse of what the phrase "4pm–midnight gate" suggests:
+
+- Heavy lanes — **GPU / CPU / MANUAL** (quad encodes, audio split + zip, remasters, reels)
+  — dispatch **only 00:00–16:00** (midnight to 4pm). They are **blocked 16:00–24:00**
+  (4pm to midnight), because that is when shows happen and the box must stay quiet.
+- **SCHEDULED** housekeeping (SharePoint sync, expiry sweeps, SCAN) runs **24/7** — it is
+  never gated.
+
+Source of truth: `DEFAULT_SCHEDULE` + `_ENCODE_END_HOUR = 16` in `nofun/job_queue.py`. A
+`ScheduleRule(start_hour, end_hour)` is active when `start_hour <= current_hour < end_hour`
+(`is_active()`), so `end_hour=24` means "until midnight" and `end_hour=16` means "stops at 4pm".
+
+Consequences worth internalising:
+- A MANUAL job (e.g. REMASTER) triggered at, say, 18:00 **enqueues but sits `pending`**
+  until midnight; the status bar reads `paused`, not an error. Nothing is broken — it is
+  waiting for the window to open.
+- **NOPROBLEM** (from HOME) bypasses the gate for the rest of the day and auto-resets at
+  midnight. A *second* NOPROBLEM also sets `force=True` (re-encode `.mov`s whose four quads
+  already exist) — so press it **exactly once** unless you intend a full re-encode.
+
+Mnemonic: *heavy jobs run **overnight until 4pm**; the **4pm–midnight** stretch is the show
+window, so the pipeline deliberately goes idle then.*
 
 ## Threading model
 

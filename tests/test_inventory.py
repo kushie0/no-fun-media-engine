@@ -13,6 +13,7 @@ from nofun.inventory import (
     classify_location,
     extract_date_band,
     extract_date_band_from_path,
+    files_for_perf,
     perf_key,
     rows_from_db,
     scan_files,
@@ -519,3 +520,55 @@ class TestBuildPerformanceStates:
         states = build_performance_states(rows)
         ps = states[('2026-01-01', 'Band')]
         assert len(ps.raw_wavs) == 1
+
+
+class TestFilesForPerf:
+    """files_for_perf matches by normalised perf identity, not literal prefix —
+    so quads encoded under a non-canonical band spelling are still found."""
+
+    def _touch(self, d: pathlib.Path, name: str) -> pathlib.Path:
+        p = d / name
+        p.write_bytes(b'x')
+        return p
+
+    def test_exact_canonical_name_matches(self, tmp_path):
+        self._touch(tmp_path, '26-05-13_B_hvpie_CAM1.mp4')
+        out = files_for_perf(tmp_path, '_CAM1.mp4', '26-05-13_B_hvpie')
+        assert [p.name for p in out] == ['26-05-13_B_hvpie_CAM1.mp4']
+
+    def test_space_and_session_suffix_matches(self, tmp_path):
+        # The bug: file encoded as 'B hvpie.25' (space + session) but the perf
+        # key normalises to 'B_hvpie'. A literal '{perf}*' glob misses it.
+        f = self._touch(tmp_path, '26-05-13_B hvpie.25_CAM1.mp4')
+        out = files_for_perf(tmp_path, '_CAM1.mp4', '26-05-13_B_hvpie')
+        assert out == [f]
+
+    def test_instagram_output_with_space_name_is_detected(self, tmp_path):
+        # The reconciler's reel_ok check must also see the space-named reel.
+        self._touch(tmp_path, '26-05-13_B hvpie.25_INSTAGRAM.mp4')
+        out = files_for_perf(tmp_path, '_INSTAGRAM.mp4', '26-05-13_B_hvpie')
+        assert len(out) == 1
+
+    def test_other_band_is_excluded(self, tmp_path):
+        self._touch(tmp_path, '26-05-13_B hvpie.25_CAM1.mp4')
+        self._touch(tmp_path, '26-05-13_Grozer_CAM1.mp4')
+        out = files_for_perf(tmp_path, '_CAM1.mp4', '26-05-13_B_hvpie')
+        assert [p.name for p in out] == ['26-05-13_B hvpie.25_CAM1.mp4']
+
+    def test_suffix_filters_out_other_outputs(self, tmp_path):
+        self._touch(tmp_path, '26-05-13_B_hvpie_CAM1.mp4')
+        self._touch(tmp_path, '26-05-13_B_hvpie_INSTAGRAM.mp4')
+        out = files_for_perf(tmp_path, '_CAM1.mp4', '26-05-13_B_hvpie')
+        assert [p.name for p in out] == ['26-05-13_B_hvpie_CAM1.mp4']
+
+    def test_multiple_sessions_returned_sorted(self, tmp_path):
+        self._touch(tmp_path, '26-05-13_B hvpie.25_CAM1.mp4')
+        self._touch(tmp_path, '26-05-13_B hvpie.10_CAM1.mp4')
+        out = files_for_perf(tmp_path, '_CAM1.mp4', '26-05-13_B_hvpie')
+        assert [p.name for p in out] == [
+            '26-05-13_B hvpie.10_CAM1.mp4',
+            '26-05-13_B hvpie.25_CAM1.mp4',
+        ]
+
+    def test_missing_directory_returns_empty(self, tmp_path):
+        assert files_for_perf(tmp_path / 'nope', '_CAM1.mp4', '26-05-13_B_hvpie') == []

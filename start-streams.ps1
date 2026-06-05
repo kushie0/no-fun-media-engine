@@ -51,8 +51,4 @@ for ($i = 0; $i -lt $StreamCount; $i++) {
         Write-Host "Stream $($i+1) ready at: http://$localIP`:$port/video"
 }
 
-Write-Host 'All streams started. Press <Enter> to terminate.'
-Read-Host
-
-# kill VLC on exit
-Get-Process vlc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Write-Host 'All streams started (running detached). VLC persists after this window closes; the next relaunch kills and restarts it (see kill-on-start above).'

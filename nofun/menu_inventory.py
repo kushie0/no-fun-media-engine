@@ -273,7 +273,7 @@ class InventoryMenuMixin:
                 f" / [green]HELP[/green] / [yellow]HOME[/yellow]"
             )
 
-        disk_parts = [s for s in (self._disk_c, self._disk_d, self._disk_sp) if s]
+        disk_parts = [s for s in (self._disk_c, self._disk_d, self._disk_n, self._disk_sp) if s]
         disk_stats = '   '.join(disk_parts)
 
         if self._app:
