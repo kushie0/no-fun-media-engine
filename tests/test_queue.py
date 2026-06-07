@@ -538,7 +538,12 @@ class TestFullSyntheticRun:
         mov.write_bytes(b'')
         self._install_mock_runner(pipeline)
 
-        pipeline.run()
+        # Guard the join like the sibling tests: a non-terminating run() must
+        # fail this one test in 10s, not hang the whole suite indefinitely.
+        t = threading.Thread(target=pipeline.run, daemon=True)
+        t.start()
+        t.join(timeout=10.0)
+        assert not t.is_alive(), 'pipeline.run() did not exit within 10s'
 
         assert pipeline._job_queue.summary()['failed'] == 0, (
             f'Failed jobs: {pipeline._job_queue.summary()}'

@@ -452,6 +452,23 @@ class EncodingDB:
             self._rebuild_index()
         return pruned
 
+    def drop_performance(self, date: str, band: str) -> bool:
+        """Unconditionally remove all records for (date, band). Returns True if removed.
+
+        Unlike prune_orphaned_bands (which guards dates with zero disk presence so an
+        unmounted drive can't wipe the DB), this drops the entry outright — used to
+        reset the reserved smoke fixture so a re-stage rebuilds instead of skip-on-presence.
+        """
+        date = short_date(date)
+        date_bands = self._data.get('performances', {}).get(date)
+        if not date_bands or band not in date_bands:
+            return False
+        del date_bands[band]
+        if not date_bands:
+            del self._data['performances'][date]
+        self._rebuild_index()
+        return True
+
     def unscanned_paths(self, paths: list[pathlib.Path]) -> list[pathlib.Path]:
         """Return paths not yet in the DB or whose mtime has changed."""
         result = []

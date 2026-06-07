@@ -82,6 +82,15 @@ from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
 
 _LOCK_FILE = pathlib.Path(tempfile.gettempdir()) / 'nofun_media_engine.lock'
 
+# Reserved band name for the synthetic smoke-test fixture. Performances under
+# this band are throwaway and must never reach OneDrive — the manifest SYNC
+# QUADS/AUDIO jobs would otherwise push them unconditionally.
+SMOKE_TEST_BAND = 'SMOKETEST'
+
+
+def _is_smoke_band(band: str) -> bool:
+    return band.strip().upper() == SMOKE_TEST_BAND
+
 
 def _acquire_lock() -> None:
     """Exit immediately if another instance is already running."""
@@ -99,7 +108,7 @@ def _acquire_lock() -> None:
 
 # Home command bar text — restored after exiting any interactive menu
 _HOME_COMMANDS = (
-    "Available commands:  NOPROBLEM / INVENTORY / JOBS / PAUSE / [green]HELP[/green]"
+    "Available commands:  NOPROBLEM / INVENTORY / JOBS / SCAN / PAUSE / [green]HELP[/green]"
 )
 
 # ---------------------------------------------------------------------------
@@ -306,6 +315,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         # Dedup: perf keys with active manifests; prevents re-enqueue each loop
         self._enqueued_keys:      set[str]       = set()
         self._enqueued_keys_lock: threading.Lock = threading.Lock()
+        # Last process-gate block reason logged; dedups the gate-hold line so it
+        # fires only on state change instead of every 15 s loop.
+        self._last_gate_block:    str            = ''
         # Cache of content-detected mov layouts, keyed on str(path) →
         # ((path, mtime_ns, size), Layout); avoids re-probing on every loop.
         self._layout_cache: dict[str, tuple] = {}
@@ -606,6 +618,30 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             self._run_inventory()
             self.logger.info("Inventory rebuild complete")
 
+    def _heal_stale_smoke_entries(self) -> bool:
+        """Drop reserved smoke-band DB entries whose outputs are gone from disk.
+
+        prune_orphaned_bands deliberately preserves dates with zero disk presence
+        so an unmounted drive can't wipe the DB — which would otherwise keep a
+        cleaned smoke entry forever and make the engine skip-on-presence on the
+        next re-stage. The smoke fixture is synthetic and disposable, so it gets
+        no such protection: if its recorded quads are gone, drop the entry so a
+        re-stage rebuilds cleanly. Returns True if anything was dropped.
+        """
+        dropped = False
+        for date, band, perf in self._encoding_db.all_performances():
+            if not _is_smoke_band(band):
+                continue
+            quads = perf.get('quadrant_video') or []
+            paths = [q['path'] for q in quads
+                     if isinstance(q, dict) and q.get('path')]
+            if paths and not all(pathlib.Path(p).exists() for p in paths):
+                if self._encoding_db.drop_performance(date, band):
+                    self.logger.info(
+                        f"SCAN: cleared stale smoke entry {date}_{band} (outputs gone)")
+                    dropped = True
+        return dropped
+
     # -----------------------------------------------------------------------
     # SharePoint sync
     # -----------------------------------------------------------------------
@@ -662,6 +698,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             base = ul_file.stem[:-5]
             date_str, band = extract_date_band(base)
             if date_str == 'TBD':
+                continue
+            if _is_smoke_band(band):
                 continue
             try:
                 y, mo, d = date_str.split('-')
@@ -1091,8 +1129,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             self._clear_op('remaster')
             return
 
-        # Copy AUDIO to SharePoint date folder
-        if self.sharepoint_dest and self.sharepoint_dest.is_dir():
+        # Copy AUDIO to SharePoint date folder. The throwaway smoke band must
+        # never reach OneDrive — this copy bypasses _sync_perf_files (and its
+        # guard), so it needs its own band check.
+        if (self.sharepoint_dest and self.sharepoint_dest.is_dir()
+                and not _is_smoke_band(ps.band)):
             from nofun.inventory import extract_date_band as _edb
             for wav_path in results:
                 wav_date, _ = _edb(wav_path.stem)
@@ -1416,6 +1457,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             )
             summary = self._encoding_db._data.setdefault('summary', {})
             summary['total_runtime_seconds'] = total_rt
+            backfill_dirty = True
+
+        # Reserved smoke fixture self-heals: a cleaned (outputs-gone) entry is
+        # dropped so the next re-stage rebuilds instead of skip-on-presence.
+        if self._heal_stale_smoke_entries():
             backfill_dirty = True
 
         # SCAN: new + stale; BIGSCAN: everything
@@ -2014,6 +2060,10 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     )
             case 'STREAMS':
                 self._enter_streams_menu()
+            case 'SCAN':
+                self._run_scan_async('SCAN')
+            case 'BIGSCAN':
+                self._run_scan_async('BIGSCAN')
             case 'REPROCESS':
                 self._cmd_reprocess()
             case 'TEST':
@@ -2266,6 +2316,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             date_str, band = extract_date_band(mov.stem)
             if date_str == 'TBD' or not band or band.upper() in ('NOFUN', 'TBD'):
                 continue
+            if _is_smoke_band(band):
+                continue
             if (date_str, band) in self._sp_placeholder_done:
                 continue
             try:
@@ -2495,6 +2547,17 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 silent_recs = perf_db and perf_db.get('audio_all_silent')
                 if not silent_recs:
                     continue
+                # Completeness guard: the all-silent verdict is only trustworthy
+                # if it was computed on the full channel set. If more channels are
+                # present now than were probed when the flag was written, it was a
+                # partial probe (e.g. active channels still landing) — let the
+                # audio pipeline re-probe rather than draining them unheard. The
+                # mtime guard below can't catch this: copy/restore preserves source
+                # mtime, so a freshly-arrived channel looks older than the flag.
+                n_probed = silent_recs[0].get('n_channels')
+                present = [f for f in mapping[perf_key] if f.exists()]
+                if n_probed is not None and len(present) > n_probed:
+                    continue
                 # FS-first: if any file is newer than when we probed silence,
                 # let the audio pipeline re-probe rather than blindly archiving.
                 updated_ts = silent_recs[0].get('updated', '')
@@ -2608,9 +2671,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             self.logger.warning(f"REMASTER  cannot parse perf key: {perf!r}")
             return
         date_str, band = parts[0], parts[1]
-        # _perf_key uses YY-MM-DD; _status_entries keys use YYYY-MM-DD
-        if len(date_str) == 8 and date_str[2] == '-':
-            date_str = '20' + date_str
+        # Both perf keys and _status_entries keys are canonical YY-MM-DD since the
+        # DB migration re-keyed long dates; normalise in case a long date leaks in
+        # via perf so the comparison doesn't silently miss (the old code expanded
+        # to YYYY-MM-DD and never matched, skipping REMASTER for every band).
+        date_str = short_date(date_str)
         for (d, b), ps in self._status_entries:
             if d == date_str and b == band:
                 self._do_remaster_for_band(d, ps)
@@ -2646,6 +2711,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return
         parts = perf.split('_', 1)
         date_str = parts[0]
+        if _is_smoke_band(parts[1] if len(parts) > 1 else ''):
+            return
         try:
             d_parts = date_str.split('-')
             if date_str.startswith('20'):
@@ -2904,6 +2971,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             base = mov.stem
             _quads = [self.vids_dest / f'{base}_{q}.mp4' for q in CAM_LABELS]
             if all(p.exists() for p in _quads) and not self.force:
+                self.logger.info(
+                    f'{perf}: encode_quads skipped — all 4 quads present at '
+                    f'{self.vids_dest}')
                 continue
             job = _ScriptJob(
                 kind='encode_quads',
@@ -3249,6 +3319,22 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             if self._active_menu != MenuMode.NONE or self._pause_state == PauseState.PAUSED:
                 can_process = False
 
+            # Name why the build block is skipped while raw inputs wait, so a
+            # silent gate (menu open, pause, off-window) is visible in the log.
+            if not can_process and (mov_files or wav_files):
+                if self._pause_state == PauseState.PAUSED:
+                    _block = 'PAUSED'
+                elif self._active_menu != MenuMode.NONE:
+                    _block = f'menu open ({self._active_menu.name})'
+                else:
+                    _block = 'outside GPU schedule window'
+                _reason = f'{_block}: {len(mov_files)} mov + {len(wav_files)} wav waiting'
+                if _reason != self._last_gate_block:
+                    self.logger.info(f'PROCESS GATE holding — {_reason}')
+                    self._last_gate_block = _reason
+            elif can_process and self._last_gate_block:
+                self._last_gate_block = ''
+
             _in_menu = (self._active_menu != MenuMode.NONE)
             if app and not _in_menu:
                 self._cached_total_eta = self._estimate_total_eta()
@@ -3314,6 +3400,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                         if perf in self._enqueued_keys:
                             if any(qj.manifest_key == perf
                                    for qj in self._job_queue.all_active()):
+                                self.logger.debug(
+                                    f'{perf}: skip rebuild — manifest still active')
                                 continue
                             self._enqueued_keys.discard(perf)
                     manifest, cat_map = self._build_full_manifest(
@@ -3326,6 +3414,14 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                         )
                         with self._enqueued_keys_lock:
                             self._enqueued_keys.add(perf)
+                    elif mov_list or _singles:
+                        # A raw mov was present but produced no jobs — every
+                        # lifecycle step decided it had nothing to do.  Name it
+                        # so a stuck perf isn't silently dropped each loop.
+                        self.logger.info(
+                            f'{perf}: 0 jobs built despite '
+                            f'{len(mov_list)} mov + {len(_singles)} single(s) '
+                            f'present — all lifecycle steps skipped')
 
             if self.delete_queue.items:
                 self.delete_queue.execute(self.logger, self._pipeline_moved)

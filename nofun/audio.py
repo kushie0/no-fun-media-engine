@@ -135,7 +135,7 @@ class AudioMixin:
             band = parts[1]
         try:
             db.upsert(date_str, band, 'audio_all_silent', {
-                'path': group_key, 'updated': _now_iso(),
+                'path': group_key, 'updated': _now_iso(), 'n_channels': len(files),
             })
             db.save()
         except Exception:

@@ -199,6 +199,34 @@ class TestEncodingDBPruneOrphanedBands:
         assert db.get_performance('26-04-07', 'MX_LONELY') is not None
 
 
+class TestEncodingDBDropPerformance:
+    def test_removes_entry_unconditionally(self, db: EncodingDB) -> None:
+        db.upsert('01-01-01', 'SMOKETEST', 'quadrant_video', _rec('/a_UL.mp4'))
+        assert db.drop_performance('01-01-01', 'SMOKETEST') is True
+        assert db.get_performance('01-01-01', 'SMOKETEST') is None
+
+    def test_drops_zero_disk_date_that_prune_preserves(self, db: EncodingDB) -> None:
+        # prune_orphaned_bands leaves this date alone (not in valid_by_date);
+        # drop_performance removes it outright.
+        db.upsert('01-01-01', 'SMOKETEST', 'quadrant_video', _rec('/a_UL.mp4'))
+        assert db.prune_orphaned_bands({'26-04-07': {'MX_LONELY'}}) == 0
+        assert db.drop_performance('01-01-01', 'SMOKETEST') is True
+
+    def test_returns_false_for_unknown(self, db: EncodingDB) -> None:
+        assert db.drop_performance('01-01-01', 'SMOKETEST') is False
+
+    def test_normalizes_long_date(self, db: EncodingDB) -> None:
+        db.upsert('01-01-01', 'SMOKETEST', 'quadrant_video', _rec('/a_UL.mp4'))
+        assert db.drop_performance('2001-01-01', 'SMOKETEST') is True
+
+    def test_removes_empty_date_and_updates_index(self, db: EncodingDB) -> None:
+        path = '/01-01-01_SMOKETEST_UL.mp4'
+        db.upsert('01-01-01', 'SMOKETEST', 'quadrant_video', _rec(path))
+        db.drop_performance('01-01-01', 'SMOKETEST')
+        assert '01-01-01' not in db._data.get('performances', {})
+        assert db.lookup(pathlib.Path(path)) is None
+
+
 class TestEncodingDBAllPerformances:
     def test_sorted_newest_first(self, db: EncodingDB) -> None:
         db.upsert('2026-03-01', 'A', 'quadrant_video', _rec('/a.mp4'))

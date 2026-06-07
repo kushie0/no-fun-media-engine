@@ -526,3 +526,81 @@ class TestFinishIncompleteShows:
         ]
         fp._finish_incomplete_shows()
         assert len(fp.remaster_calls) == 1, fp.remaster_calls
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _drain_all_silent_perfs completeness guard (no ffmpeg required)
+# ---------------------------------------------------------------------------
+
+class _FakePipelineDrain:
+    """Minimal Pipeline stand-in for _drain_all_silent_perfs."""
+
+    def __init__(self, tmp_path: pathlib.Path) -> None:
+        from nofun.encoding_db import EncodingDB
+        self.audio_dest    = tmp_path / 'audio'
+        self.audio_archive = tmp_path / 'audio_archive'
+        for d in (self.audio_dest, self.audio_archive):
+            d.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger('test_drain')
+        self._encoding_db = EncodingDB(tmp_path / 'db.json')
+        self._audio_silent_notified: set[str] = set()
+        self.archived: list[pathlib.Path] = []
+
+    def _archive_or_dedup(self, f: pathlib.Path, dest: pathlib.Path) -> None:
+        self.archived.append(f)
+
+
+class TestDrainAllSilent:
+    def _make(self, tmp_path: pathlib.Path) -> _FakePipelineDrain:
+        from media_engine import Pipeline
+        fp = _FakePipelineDrain(tmp_path)
+        fp._drain_all_silent_perfs = Pipeline._drain_all_silent_perfs.__get__(fp)
+        return fp
+
+    def _wavs(self, tmp_path: pathlib.Path, perf: str, n: int) -> list[pathlib.Path]:
+        out = []
+        for i in range(1, n + 1):
+            p = tmp_path / f'{perf}_chan{i}.wav'
+            p.write_bytes(b'\x00' * 100)
+            out.append(p)
+        return out
+
+    def test_count_guard_skips_drain_when_more_channels_present(self, tmp_path):
+        # Flag was written on a 2-channel partial probe; 3 channels are present
+        # now (active ones arrived late). The drain must NOT archive them — it
+        # leaves the perf in the mapping so the audio job re-probes.
+        fp = self._make(tmp_path)
+        fp._encoding_db.upsert('26-01-01', 'Band', 'audio_all_silent',
+                               {'path': '26-01-01_Band',
+                                'updated': '2099-01-01T00:00:00', 'n_channels': 2})
+        files = self._wavs(tmp_path, '26-01-01_Band', 3)
+        mapping = {'26-01-01_Band': files}
+        fp._drain_all_silent_perfs(mapping, {})
+        assert fp.archived == []
+        assert '26-01-01_Band' in mapping
+
+    def test_count_match_drains(self, tmp_path):
+        # Same channel count as probed (and no ZIP): genuinely all-silent, drain
+        # archives every channel and drops the perf from the mapping.
+        fp = self._make(tmp_path)
+        fp._encoding_db.upsert('26-01-01', 'Band', 'audio_all_silent',
+                               {'path': '26-01-01_Band',
+                                'updated': '2099-01-01T00:00:00', 'n_channels': 2})
+        files = self._wavs(tmp_path, '26-01-01_Band', 2)
+        mapping = {'26-01-01_Band': files}
+        fp._drain_all_silent_perfs(mapping, {})
+        assert len(fp.archived) == 2
+        assert '26-01-01_Band' not in mapping
+
+    def test_legacy_flag_without_count_still_drains(self, tmp_path):
+        # Back-compat: a flag written before n_channels existed has no count, so
+        # the count guard is inert and the (old-mtime) drain proceeds as before.
+        fp = self._make(tmp_path)
+        fp._encoding_db.upsert('26-01-01', 'Band', 'audio_all_silent',
+                               {'path': '26-01-01_Band',
+                                'updated': '2099-01-01T00:00:00'})
+        files = self._wavs(tmp_path, '26-01-01_Band', 3)
+        mapping = {'26-01-01_Band': files}
+        fp._drain_all_silent_perfs(mapping, {})
+        assert len(fp.archived) == 3
+        assert '26-01-01_Band' not in mapping
