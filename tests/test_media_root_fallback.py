@@ -123,12 +123,12 @@ def test_failback_reconcile_uses_reversed_pairs(tmp_path, monkeypatch):
     recorded = {}
     done = threading.Event()
 
-    def _fake_mirror(pairs, **kw):
+    def _fake_mirror(pairs, *a, **kw):
         recorded['pairs'] = pairs
         done.set()
         return (len(pairs), 0)
 
-    monkeypatch.setattr(media_engine, 'mirror_deliverables', _fake_mirror)
+    monkeypatch.setattr(media_engine, 'mirror_files', _fake_mirror)
     p._enqueue_failback_reconcile(nas)
 
     assert done.wait(timeout=2.0), 'failback reconcile thread never ran'

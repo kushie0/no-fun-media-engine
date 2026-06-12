@@ -187,7 +187,10 @@ class TestFfmpegIntegration:
         out = tmp_path / 'single.mp4'
         self._make(
             out,
-            'gradients=s=640x360:r=30:d=2,format=gray[out]',
+            # colours pinned — gradients defaults to random colours per run,
+            # and some draws produce an edge the seam detector reads as a quad
+            'gradients=s=640x360:r=30:d=2:c0=black:c1=white:nb_colors=2,'
+            'format=gray[out]',
             [],
         )
         # A smooth full-frame gradient has no internal seam.

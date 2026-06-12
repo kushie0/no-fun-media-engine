@@ -5,122 +5,15 @@ without running ffmpeg or touching the D: drive.
 """
 
 import datetime
-import logging
 import pathlib
-import queue
-import threading
 import time as _time
 import unittest.mock
 from unittest.mock import MagicMock
 
 import pytest
 
-from nofun.media_io import DeleteQueue
 from nofun.state import MenuMode, PauseState
-from media_engine import Pipeline, _HOME_COMMANDS
-
-
-# ---------------------------------------------------------------------------
-# Shared lightweight Pipeline stub
-# ---------------------------------------------------------------------------
-
-class _FakePipeline(Pipeline):
-    """Pipeline subclass with a minimal __init__ for unit testing.
-
-    Bypasses full Pipeline initialisation (path detection, logging setup,
-    encoder config) and wires in a tmp_path-based layout instead.
-    """
-
-    def __init__(self, tmp_path: pathlib.Path) -> None:
-        # Skip super().__init__() — set every attribute Pipeline uses directly
-        self.directory        = tmp_path
-        self.trial_run        = 0
-        self.force            = False
-        self.exit_on_complete = False
-        self.skip_audio       = False
-        self.gpu              = False
-        self.cleanup_only     = False
-
-        self.search_dir      = tmp_path
-        self.vids_dest       = tmp_path / 'videos'
-        self.clips_dest      = tmp_path / 'clips'
-        self.audio_dest      = tmp_path / 'audio'
-        self.video_archive   = tmp_path / 'video_archive'
-        self.audio_archive   = tmp_path / 'audio_archive'
-        self.sharepoint_dest = None
-        self.script_dir      = tmp_path
-        self.mount_d         = tmp_path
-        self.inventory_summary = tmp_path / 'inventory_summary.txt'
-
-        from nofun.encoding_db import EncodingDB
-        self._encoding_db = EncodingDB(tmp_path / 'encoding_db.json')
-
-        self.logger       = MagicMock(spec=logging.Logger)
-        self.delete_queue = DeleteQueue()
-        self.enc          = {'accel': [], 'enc_quad': [], 'enc_clip': []}
-
-        self._known_files:    dict = {}
-        self._file_sizes:     dict = {}
-        self._pipeline_moved: queue.Queue[str] = queue.Queue()
-        self._streams_active       = False
-        self._stream_procs:   list = []
-        self._app                  = None
-
-        self._HOME_COMMANDS        = _HOME_COMMANDS
-        self._active_menu          = MenuMode.NONE
-        self._cleanup_findings:list = []
-        self._status_entries: list = []
-        self._show_groups:    list = []
-        self._status_expanded_key  = None
-        self._rename_state         = None
-        self._remaster_state       = None
-        self._rename_date          = None
-        self._rename_band          = None
-        self._rename_new_name      = None
-        self._rename_thread        = None
-        self._disk_c               = ''
-        self._disk_d               = ''
-        self._disk_n               = ''
-        self._disk_sp              = ''
-        self._stream_states:  list = []
-
-        self._pause_state             = PauseState.RUNNING
-        self._current_ffmpeg_procs:  dict = {}
-        self._ffmpeg_procs_lock      = threading.Lock()
-        self._cmd_queue              = None
-        self._current_operation    = ''
-        self._noproblem_active        = False
-        self._override_time           = False
-        from media_engine import _HelpState
-        self._help: dict = {
-            'home':      _HelpState(),
-            'inventory': _HelpState(),
-            'streams':   _HelpState(),
-            'jobs':      _HelpState(),
-        }
-        self._jobs_selected_idx       = None
-        self._manual_worker_running   = False
-        self._manual_worker_thread    = None
-        self._reprocess_candidates:   list = []
-        self._reprocess_archived:     dict = {}
-        self._enqueued_keys:          set             = set()
-        self._enqueued_keys_lock:     threading.Lock  = threading.Lock()
-        self._auto_remastered:        set  = set()
-        self._sp_placeholder_done:    set  = set()
-        self._reencode_fail_counts:   dict = {}
-        self._reencode_parked:        set  = set()
-        self._last_scheduled_enqueued: dict = {}
-        self._last_scan_enqueued:      float = 0.0
-        self._stream_server               = None
-
-        from nofun.script_runner import ScriptRunner
-        from nofun.job_queue import JobQueue
-        _runner = MagicMock(spec=ScriptRunner)
-        self._job_queue = JobQueue(_runner, self.logger)
-
-        for d in (self.vids_dest, self.clips_dest, self.audio_dest,
-                  self.video_archive, self.audio_archive):
-            d.mkdir(parents=True, exist_ok=True)
+from tests.fake_pipeline import FakePipeline as _FakePipeline
 
 
 def _seed_db(fp: '_FakePipeline', rows: list[dict]) -> None:

@@ -1,77 +1,45 @@
 """Unit tests for nofun/audio.py (AudioMixin)."""
 
+import io
 import pathlib
+import struct
+import wave
 import zipfile
-from typing import Any
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from nofun.audio import MIN_ACTIVE_SECONDS, AudioMixin
 from nofun.script_runner import ScriptResult
+from tests.fake_pipeline import FakePipeline
+
+
+def _real_wav_bytes(frames: int = 2400, rate: int = 48000) -> bytes:
+    """A valid little 16-bit mono WAV — ffmpeg/FLAC can actually encode it.
+
+    The zip path now FLAC-encodes each channel via ffmpeg, so fixtures that get
+    bundled must be real WAVs, not `b'\\x00'` placeholder bytes.
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b''.join(struct.pack('<h', (i % 100) - 50)
+                                for i in range(frames)))
+    return buf.getvalue()
+
+
+_REAL_WAV = _real_wav_bytes()
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-class _FakeAudio(AudioMixin):
-    """Minimal stub that satisfies AudioMixin's required attributes."""
-    # Typed as Any so MagicMock assignments and mock assertions pass Pyright
-    logger:       Any
-    delete_queue: Any
-    _pause_state: Any
-    _app:         Any
-
-    def __init__(self, tmp_path: pathlib.Path):
-        self.search_dir    = tmp_path
-        self.audio_dest    = tmp_path / 'audio'
-        self.audio_archive = tmp_path / 'archive'
-        self.logger        = MagicMock()
-        self.delete_queue  = MagicMock()
-        self.trial_run     = 0
-        self.force         = False
-        self.mount_d                = pathlib.Path('.')
-        self._app                   = None
-        self._pause_state             = MagicMock()
-        self._current_ffmpeg_procs:  dict = {}
-        self._script_runner = MagicMock()
-        self._script_runner.run.return_value = ScriptResult(
-            script='split_audio', exit_code=0,
-            stdout_json={}, stderr_tail='', elapsed=0.0,
-        )
-
-        for d in (self.audio_dest, self.audio_archive):
-            d.mkdir(parents=True, exist_ok=True)
-
-    def _move_to_hard_paused(self, files):
-        pass
-
-    def _archive_or_dedup(self, src: pathlib.Path, archive_dir: pathlib.Path) -> None:
-        import shutil
-        if src.exists():
-            try:
-                shutil.move(str(src), str(archive_dir))
-            except PermissionError:
-                pass
-
-    def _is_file_stable(self, path: pathlib.Path) -> bool:
-        return True
-
-    def _flush_commands(self) -> None:
-        pass
-
-    def _set_ffmpeg_proc(self, key: str, proc) -> None:
-        if proc is None:
-            self._current_ffmpeg_procs.pop(key, None)
-        else:
-            self._current_ffmpeg_procs[key] = proc
-
-    def _set_op(self, key: str, text: str) -> None:
-        pass
-
-    def _clear_op(self, key: str) -> None:
-        pass
+def _FakeAudio(tmp_path: pathlib.Path) -> FakePipeline:
+    """Shared FakePipeline with a mocked delete_queue (tests assert .add calls)."""
+    fa = FakePipeline(tmp_path)
+    fa.delete_queue = MagicMock()
+    return fa
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +103,7 @@ class TestCreateAndVerifyZip:
     def test_creates_valid_zip(self, tmp_path):
         fa = _FakeAudio(tmp_path)
         src = tmp_path / 'test.wav'
-        src.write_bytes(b'\x00' * 1024)
+        src.write_bytes(_REAL_WAV)
         zip_path = tmp_path / 'test.zip'
 
         ok, dropped = fa._create_and_verify_zip(zip_path, [src])
@@ -143,8 +111,10 @@ class TestCreateAndVerifyZip:
         assert ok is True
         assert dropped == []
         assert zip_path.exists()
+        # WAV is FLAC-encoded into the bundle; the arcname switches to .flac.
         with zipfile.ZipFile(zip_path) as zf:
-            assert 'test.wav' in zf.namelist()
+            assert 'test.flac' in zf.namelist()
+            assert 'test.wav' not in zf.namelist()
 
     def test_returns_false_and_drops_missing_file(self, tmp_path):
         fa = _FakeAudio(tmp_path)
@@ -157,23 +127,25 @@ class TestCreateAndVerifyZip:
         assert dropped == [missing]
         assert not zip_path.exists()
 
-    def test_uses_deflate_compression(self, tmp_path):
+    def test_uses_stored_compression(self, tmp_path):
+        """FLAC is already compressed, so the entry is STORED (no second deflate)."""
         fa = _FakeAudio(tmp_path)
         src = tmp_path / 'audio.wav'
-        src.write_bytes(b'\x00' * 512)
+        src.write_bytes(_REAL_WAV)
         zip_path = tmp_path / 'audio.zip'
 
         fa._create_and_verify_zip(zip_path, [src])
 
         with zipfile.ZipFile(zip_path) as zf:
-            info = zf.getinfo('audio.wav')
-            assert info.compress_type == zipfile.ZIP_DEFLATED
+            info = zf.getinfo('audio.flac')
+            assert info.compress_type == zipfile.ZIP_STORED
+            assert info.compress_size == info.file_size
 
     def test_partial_missing_produces_zip_with_survivors(self, tmp_path):
         """Some files missing: ZIP still created with survivors; missing returned in dropped."""
         fa = _FakeAudio(tmp_path)
         present = tmp_path / 'chan1.wav'
-        present.write_bytes(b'\x00' * 256)
+        present.write_bytes(_REAL_WAV)
         missing = tmp_path / 'chan2.wav'
         zip_path = tmp_path / 'partial.zip'
 
@@ -183,8 +155,8 @@ class TestCreateAndVerifyZip:
         assert dropped == [missing]
         assert zip_path.exists()
         with zipfile.ZipFile(zip_path) as zf:
-            assert 'chan1.wav' in zf.namelist()
-            assert 'chan2.wav' not in zf.namelist()
+            assert 'chan1.flac' in zf.namelist()
+            assert 'chan2.flac' not in zf.namelist()
 
 
 class TestZipWavGroupDroppedFiles:
@@ -195,7 +167,7 @@ class TestZipWavGroupDroppedFiles:
         fa = _FakeAudio(tmp_path)
         fa.logger = logging.getLogger('test_zip_drop')
         present = tmp_path / '26-05-13_BAND_chan1.wav'
-        present.write_bytes(b'\x00' * 256)
+        present.write_bytes(_REAL_WAV)
         missing = tmp_path / '26-05-13_BAND_chan2.wav'
         # Don't create missing — pre-flight will drop it
         with caplog.at_level(logging.WARNING, logger='test_zip_drop'):
@@ -247,7 +219,7 @@ class TestGroupWavFilesAudioDir:
 class TestProcessAudioDirWavs:
     def _make_wav(self, path: pathlib.Path, name: str) -> pathlib.Path:
         f = path / name
-        f.write_bytes(b'\x00' * 256)
+        f.write_bytes(_REAL_WAV)
         return f
 
     def test_skips_missing_audio_dir(self, tmp_path):
@@ -369,6 +341,7 @@ class TestArchiveEmptyWavs:
 
     def test_empty_wav_queued_without_real_drive(self, tmp_path):
         fa = _FakeAudio(tmp_path)
+        fa.mount_d = pathlib.Path('.')  # not a real drive
         f = tmp_path / 'empty.wav'
         f.write_bytes(b'')
         result = fa._archive_empty_wavs([f])
@@ -390,6 +363,7 @@ class TestArchiveEmptyWavs:
 
     def test_mixed_empty_and_nonempty(self, tmp_path):
         fa = _FakeAudio(tmp_path)
+        fa.mount_d = pathlib.Path('.')  # not a real drive
         good = tmp_path / 'good.wav'
         good.write_bytes(b'\x00' * 256)
         bad = tmp_path / 'bad.wav'
@@ -406,7 +380,7 @@ class TestArchiveEmptyWavs:
 class TestZipWavGroup:
     def _wav(self, parent: pathlib.Path, name: str) -> pathlib.Path:
         f = parent / name
-        f.write_bytes(b'\x00' * 256)
+        f.write_bytes(_REAL_WAV)
         return f
 
     def test_creates_zip(self, tmp_path):
@@ -483,7 +457,7 @@ class TestZipWavGroup:
         fa._app = MagicMock()
         # Two channel files for one perf → total > 1 → progress fires
         for n in (1, 2):
-            (tmp_path / f'26-01-01_Band_ch{n:02d}.wav').write_bytes(b'\x00' * 256)
+            (tmp_path / f'26-01-01_Band_ch{n:02d}.wav').write_bytes(_REAL_WAV)
         fa._export_audio_zips()
         assert fa._app.update_audio_progress.called
 
@@ -685,7 +659,7 @@ class TestSweepLeftoverWavs:
 
     def test_original_wav_queued_without_real_drive(self, tmp_path):
         fa  = _FakeAudio(tmp_path)
-        # mount_d stays as Path('.') — not a real drive
+        fa.mount_d = pathlib.Path('.')  # not a real drive
         self._wav(tmp_path, '26-01-01_Band.wav')
         fa._sweep_leftover_wavs()
         fa.delete_queue.add.assert_called_once()

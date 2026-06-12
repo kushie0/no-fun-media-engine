@@ -31,30 +31,47 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 MIN_ACTIVE_SECONDS = 5   # seconds — channels with less signal than this are dropped
-_DEFLATE_LEVEL     = 1   # fastest deflate; higher = smaller file but slower
 
-# Sentinel returned by _compress_one_wav when a file disappears mid-ZIP.
-# arcname='' signals the caller to skip this entry and log it as dropped.
+# Sentinel returned by _encode_one_flac when a file disappears or fails to encode
+# mid-ZIP. arcname='' signals the caller to skip this entry and log it as dropped.
 _COMPRESS_MISSING: tuple[str, bytes, int, int] = ('', b'', -1, 0)
 
 
-def _compress_one_wav(path: pathlib.Path) -> tuple[str, bytes, int, int]:
-    """Read and raw-deflate a file.
+def _encode_one_flac(path: pathlib.Path) -> tuple[str, bytes, int, int]:
+    """Encode a channel WAV to FLAC and return its bytes (for ZIP_STORED).
 
-    zlib releases the GIL during compression, so multiple threads running
-    this function compress truly in parallel.
+    FLAC models the waveform, so PCM shrinks to ~40% where raw deflate barely
+    moved it. The already-compressed FLAC is then *stored* in the zip (no second
+    deflate pass). ffmpeg runs as a subprocess, so threads encode in parallel.
 
-    Returns (arcname, compressed_bytes, original_size, crc32), or
-    _COMPRESS_MISSING if the file disappeared between queue and read.
+    Bit depth: the source WAVs are 32-bit PCM but FLAC's ceiling is 24-bit, so
+    the top 24 bits are kept bit-exact and the low 8 bits are dropped. Those low
+    bits sit below any mic/preamp noise floor (24-bit ≈ 144 dB), so this is
+    perceptually lossless and the mp3 deliverable is unaffected — but it is NOT
+    a bit-exact round-trip back to the original 32-bit WAV. (Decision: accept
+    24-bit FLAC as the archive depth, 2026-06-07.)
+
+    Returns (arcname='{stem}.flac', flac_bytes, size, crc32), or
+    _COMPRESS_MISSING if the source vanished or could not be encoded.
     """
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
+    if not path.exists():
         return _COMPRESS_MISSING
-    crc  = zlib.crc32(data) & 0xFFFFFFFF
-    obj  = zlib.compressobj(_DEFLATE_LEVEL, zlib.DEFLATED, -15)  # -15 = raw deflate
-    compressed = obj.compress(data) + obj.flush(zlib.Z_FINISH)
-    return path.name, compressed, len(data), crc
+    with tempfile.NamedTemporaryFile(suffix='.flac', delete=False) as tmp:
+        tmp_path = pathlib.Path(tmp.name)
+    try:
+        proc = subprocess.run(
+            ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+             '-i', str(path), '-c:a', 'flac', '-compression_level', '8',
+             str(tmp_path)],
+            capture_output=True,
+        )
+        if proc.returncode != 0 or not tmp_path.exists():
+            return _COMPRESS_MISSING
+        data = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    return path.stem + '.flac', data, len(data), crc
 
 
 # ---------------------------------------------------------------------------
@@ -384,12 +401,12 @@ class AudioMixin:
                                 source_files: list[pathlib.Path],
                                 progress_cb=None,
                                 ) -> tuple[bool, list[pathlib.Path]]:
-        """Compress source_files into zip_path using all available CPU cores.
+        """Encode source_files to FLAC and bundle them into zip_path.
 
-        Each file is deflated in a worker thread (zlib releases the GIL so
-        threads run truly in parallel).  The compressed bytes are then written
-        into the zip serially using zipfile internals to skip a second
-        compression pass.
+        Each channel WAV is FLAC-encoded in a worker thread (ffmpeg runs as a
+        subprocess, releasing the GIL, so threads encode truly in parallel).
+        The already-compressed FLAC bytes are then written into the zip serially
+        with ZIP_STORED — no second deflate pass.
 
         Returns (success, dropped). dropped is the subset of source_files that
         vanished mid-ZIP (FileNotFoundError on read_bytes); they're skipped
@@ -405,7 +422,7 @@ class AudioMixin:
             completed = 0
             ordered: dict[pathlib.Path, tuple[str, bytes, int, int]] = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-                future_map = {pool.submit(_compress_one_wav, f): f
+                future_map = {pool.submit(_encode_one_flac, f): f
                               for f in source_files}
                 for fut in concurrent.futures.as_completed(future_map):
                     if self._pause_state == PauseState.HARD_PENDING:
@@ -435,15 +452,16 @@ class AudioMixin:
                 )
                 return False, dropped
 
-            # --- Step 2: write zip, injecting pre-compressed bytes ---
-            # We write the local file header + raw deflate stream directly so
-            # zipfile doesn't re-compress.  Uses semi-internal ZipFile.fp /
-            # filelist / NameToInfo — stable across CPython 3.8+.
+            # --- Step 2: write zip, injecting pre-encoded FLAC bytes ---
+            # The channels are already FLAC-compressed, so we STORE them (no
+            # second deflate pass) by writing the local file header + raw bytes
+            # directly.  Uses semi-internal ZipFile.fp / filelist / NameToInfo —
+            # stable across CPython 3.8+.
             with _zipfile.ZipFile(zip_path, 'w', allowZip64=True) as zf:
                 for f in survivors:
                     name, compressed, orig_size, crc = ordered[f]
                     zinfo = _zipfile.ZipInfo(filename=name)
-                    zinfo.compress_type  = _zipfile.ZIP_DEFLATED
+                    zinfo.compress_type  = _zipfile.ZIP_STORED
                     zinfo.file_size      = orig_size
                     zinfo.compress_size  = len(compressed)
                     zinfo.CRC            = crc
@@ -460,9 +478,11 @@ class AudioMixin:
                         zf.NameToInfo[zinfo.filename] = zinfo
 
             # --- Step 3: verify ---
+            # Entries are written under their FLAC arcname (ordered[f][0]), not
+            # the source WAV name, so compare against those.
             with _zipfile.ZipFile(zip_path, 'r') as zf:
                 names_in_zip = {e.filename for e in zf.infolist()}
-            ok = {f.name for f in survivors}.issubset(names_in_zip)
+            ok = {ordered[f][0] for f in survivors}.issubset(names_in_zip)
             return ok, dropped
 
         except Exception as e:

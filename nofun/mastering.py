@@ -1829,9 +1829,9 @@ if __name__ == '__main__':
                 with tempfile.TemporaryDirectory() as tmp:
                     with _zf.ZipFile(zip_path) as zf:
                         zf.extractall(tmp)
-                    wavs = sorted(Path(tmp).glob('*.wav'))
+                    wavs = sorted([*Path(tmp).glob('*.wav'), *Path(tmp).glob('*.flac')])
                     if not wavs:
-                        _log.warning(f'ZIP contains no WAVs: {zip_path.name}')
+                        _log.warning(f'ZIP contains no channel audio: {zip_path.name}')
                         continue
                     total_written += _run_one(wavs, base, out_dir)
             else:

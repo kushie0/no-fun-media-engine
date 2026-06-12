@@ -7,16 +7,11 @@ import pathlib
 import queue
 import shutil
 import zipfile
-from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from nofun.audio import AudioMixin
-from nofun.cleanup import AuditFinding, CleanupMixin, EXPIRE_AGE, FindingKind, archive_or_dedup, canonical_sharepoint_name, make_sharepoint_folder_name, write_sharepoint_info
+from nofun.cleanup import AuditFinding, EXPIRE_AGE, FindingKind, archive_or_dedup, canonical_sharepoint_name, make_sharepoint_folder_name, write_sharepoint_info
 from nofun.media_io import DeleteQueue
-from nofun.video import VideoMixin
 
 
 def _age_file(path: pathlib.Path, seconds: int = 7200) -> None:
@@ -25,36 +20,7 @@ def _age_file(path: pathlib.Path, seconds: int = 7200) -> None:
     os.utime(path, (t, t))
 
 
-class _FakePipeline(VideoMixin, AudioMixin, CleanupMixin):
-    # Typed as Any so MagicMock assignments and mock assertions pass Pyright
-    logger:       Any
-    delete_queue: Any
-    _pause_state: Any
-    _app:         Any
-
-    def __init__(self, tmp_path: pathlib.Path):
-        self.search_dir      = tmp_path
-        self.vids_dest       = tmp_path / 'videos'
-        self.clips_dest      = tmp_path / 'clips'
-        self.audio_dest      = tmp_path / 'audio'
-        self.video_archive   = tmp_path / 'video_archive'
-        self.audio_archive   = tmp_path / 'audio_archive'
-        self.sharepoint_dest = None
-        self.logger          = MagicMock()
-        self.delete_queue    = DeleteQueue()
-        self.trial_run       = 0
-        self.force           = False
-        self._app            = None
-        self.enc             = {'accel': [], 'enc_quad': [], 'enc_clip': []}
-        self.inventory_csv   = tmp_path / 'inventory.csv'
-        self.mount_d         = pathlib.Path('.')
-        self._file_sizes:    dict = {}
-        # Menu state (mirrors Pipeline.__init__)
-        self._active_menu      = None
-        self._HOME_COMMANDS    = ''
-        for d in (self.vids_dest, self.clips_dest, self.audio_dest,
-                  self.video_archive, self.audio_archive):
-            d.mkdir(parents=True, exist_ok=True)
+from tests.fake_pipeline import FakePipeline as _FakePipeline
 
 
 class TestFindingKind:

@@ -14,11 +14,13 @@ __all__ = [
     'PerformanceState',
     'EXPIRE_AGE',
     'RAW_EXPIRE_AGE',
+    'D_BACKUP_AGE',
 ]
 
 # Age thresholds (days from recording date)
 EXPIRE_AGE     = 28   # cloud lease length; sync stops at this age, expiry deletes after
-RAW_EXPIRE_AGE = 14   # delete local raw video + audio after this many days
+RAW_EXPIRE_AGE = 30   # delete local raw video + audio after this many days
+D_BACKUP_AGE   = 180  # rolling raw-backup window on the D: tier (.mov + _MULTITRACK.zip)
 
 import concurrent.futures
 import dataclasses

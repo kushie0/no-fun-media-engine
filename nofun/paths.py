@@ -64,14 +64,17 @@ def detect_mounts() -> tuple[pathlib.Path, pathlib.Path]:
 def detect_clips_root(mount_d: pathlib.Path) -> pathlib.Path:
     """Return the directory where encoded clip outputs live.
 
-    Honours the CLIPS_ROOT env var; falls back to ``mount_d / 'clips'`` so
-    historical setups (clips on D:) keep working without configuration.
-
-    Set CLIPS_ROOT to put clips on a faster disk (e.g. C:\\clips on an SSD
-    when D: is an HDD shared with streaming reads).
+    Honours the CLIPS_ROOT env var. On native Windows the default is
+    ``C:\\clips`` (SSD primary, read by the stream scripts) so the engine
+    lands on the same root no matter how it was launched; elsewhere falls
+    back to ``mount_d / 'clips'``.
     """
     env = os.environ.get('CLIPS_ROOT')
-    return pathlib.Path(env) if env else (mount_d / 'clips')
+    if env:
+        return pathlib.Path(env)
+    if sys.platform == 'win32' and 'MSYSTEM' not in os.environ:
+        return pathlib.Path('C:/clips')
+    return mount_d / 'clips'
 
 
 def detect_media_root(mount_d: pathlib.Path) -> pathlib.Path:

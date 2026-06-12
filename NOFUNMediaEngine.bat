@@ -1,6 +1,6 @@
 @echo off
-:: D: is the primary clip destination. C:\clips is kept in sync by robocopy for stream scripts.
-set "CLIPS_ROOT=D:\clips"
+:: Clips live on C: (SSD primary, read directly by stream scripts). NAS gets an hourly mirror.
+set "CLIPS_ROOT=C:\clips"
 set TMUX_EXE=
 where tmux >nul 2>&1
 if %ERRORLEVEL% == 0 set TMUX_EXE=tmux

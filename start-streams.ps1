@@ -5,7 +5,7 @@
 # IT CALMS DOWN I PROMISE :)
 
 param(
-        [string]$ClipRoot   = $(if ($env:CLIPS_ROOT) { $env:CLIPS_ROOT } else { "D:\clips" }),
+        [string]$ClipRoot   = $(if ($env:CLIPS_ROOT) { $env:CLIPS_ROOT } else { "C:\clips" }),
         [int]$BasePort      = 8554,
         [int]$StreamCount   = 5
 )
@@ -15,13 +15,19 @@ $host.UI.RawUI.WindowTitle = "NOFUN Streams"
 # kill VLC on start (-Force handles VLCs owned by a different session, e.g. a prior launch)
 Get-Process vlc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-# ---- helper: find local IP that faces the default route ----
-function Get-LocalIP {
-        $adapter = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object -Property RouteMetric -EQ 0).InterfaceAlias
-        (Get-NetIPAddress -InterfaceAlias $adapter -AddressFamily IPv4).IPAddress
+# ---- helper: list the LAN IPs to advertise ----
+# VLC binds to all interfaces (dst=:$port below), so the stream is reachable on
+# every IP regardless. This is only for the printed URL. On a multi-homed host
+# we print one line per real IPv4 address so it's unambiguous which to use.
+# Set $env:STREAM_IP (machine-local, e.g. via setx) to advertise just one.
+function Get-LocalIPs {
+        if ($env:STREAM_IP) { return @($env:STREAM_IP) }
+        @(Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+                Select-Object -ExpandProperty IPAddress)
 }
 
-$localIP = Get-LocalIP
+$localIPs = Get-LocalIPs
 
 # ---- build one playlist per stream and launch VLC ----
 for ($i = 0; $i -lt $StreamCount; $i++) {
@@ -48,7 +54,9 @@ for ($i = 0; $i -lt $StreamCount; $i++) {
 
         Start-Process vlc -ArgumentList $vlcArgs -WindowStyle Hidden
 
-        Write-Host "Stream $($i+1) ready at: http://$localIP`:$port/video"
+        foreach ($lip in $localIPs) {
+                Write-Host "Stream $($i+1) ready at: http://$lip`:$port/video"
+        }
 }
 
 Write-Host 'All streams started (running detached). VLC persists after this window closes; the next relaunch kills and restarts it (see kill-on-start above).'

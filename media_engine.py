@@ -65,15 +65,17 @@ from nofun.cleanup import (
 )
 from nofun.encoding_db import EncodingDB
 from nofun.inventory import (
-    EXPIRE_AGE, RAW_EXPIRE_AGE, extract_date_band, files_for_perf, perf_key,
-    short_date, _status_label, _STATUS_ICON,
+    EXPIRE_AGE, RAW_EXPIRE_AGE, D_BACKUP_AGE, extract_date_band, files_for_perf,
+    perf_key, short_date, _status_label, _STATUS_ICON,
 )
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory, JobQueue
 from nofun.state import MenuMode, PauseState
 from nofun.video import CAM_LABELS
 from nofun.multiplex import Layout, detect_layout, route_by_layout
-from nofun.backup_mirror import mirror_deliverables
+from nofun.backup_mirror import (
+    mirror_files, find_expired, DELIVERABLE_EXTS, RAW_BACKUP_EXTS,
+)
 from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
 
 # ---------------------------------------------------------------------------
@@ -1095,9 +1097,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     tmp_path = pathlib.Path(tmp)
                     with _zf.ZipFile(zip_path) as zf:
                         zf.extractall(tmp_path)
-                    wav_files = sorted(tmp_path.glob('*.wav'))
+                    wav_files = sorted([*tmp_path.glob('*.wav'), *tmp_path.glob('*.flac')])
                     if not wav_files:
-                        self.logger.warning(f"REMASTER  ZIP contains no WAVs: {zip_path.name}")
+                        self.logger.warning(f"REMASTER  ZIP contains no channel audio: {zip_path.name}")
                         self._remaster_status[perf] = 'zip_empty'
                         self._clear_op('remaster')
                         return
@@ -1286,24 +1288,71 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         if queued:
             self.logger.info(f'FINISH  queued {queued} incomplete show(s)')
 
-    def _mirror_deliverables_to_backup(self) -> None:
-        """Mirror finished .mp4/.mp3 deliverables from the NAS down to local D:.
+    def _perf_age_days(self, path: pathlib.Path) -> int | None:
+        """Days since the show date parsed from *path*'s filename, or None if undated."""
+        date_str, _ = extract_date_band(path.stem)
+        if date_str == 'TBD':
+            return None
+        try:
+            y, mo, d = date_str.split('-')
+            rec = datetime.date(2000 + int(y), int(mo), int(d))
+        except (ValueError, TypeError):
+            return None
+        return (datetime.date.today() - rec).days
 
-        Backup tier: if the NAS dies, the finished cuts still exist locally. The
-        heavy raw/intermediate tiers (.mov/.wav/.zip) are NAS-only and excluded
-        by extension. No-op unless the NAS is the active root — on D: fallback or
-        a trial run, media_root == mount_d and there is nothing to mirror.
+    def _within_backup_window(self, path: pathlib.Path) -> bool:
+        """True if *path* is recent enough to belong in the D: raw-backup window."""
+        age = self._perf_age_days(path)
+        return age is not None and age <= D_BACKUP_AGE
+
+    def _mirror_raws_to_backup(self) -> None:
+        """Mirror raw originals (.mov + _MULTITRACK.zip) from the NAS down to local D:.
+
+        D: is a rolling D_BACKUP_AGE-day backup of the *inputs* — if the NAS dies,
+        every deliverable can be regenerated from these (the encode is
+        deterministic). Deliverables themselves are NOT backed up: that would be
+        redundant storage of recoverable data. The window gate keeps the mirror
+        from re-copying a raw the expiry just aged out (the .zip lives on N:
+        forever, so without the gate it would thrash). No-op unless the NAS is the
+        active root — on D: fallback or a trial run there is nothing to back up.
         """
         if self.media_root == self.mount_d:
             return
         pairs = [
-            (self.vids_dest,  self.mount_d / 'videos'),
-            (self.audio_dest, self.mount_d / 'audio'),
+            (self.video_archive, self.mount_d / 'video_archive'),  # .mov
+            (self.audio_dest,    self.mount_d / 'audio'),          # .zip only (not .mp3)
         ]
-        copied, skipped = mirror_deliverables(pairs)
+        copied, skipped = mirror_files(pairs, RAW_BACKUP_EXTS,
+                                       include=self._within_backup_window)
         if copied:
             self.logger.info(
-                f'BACKUP MIRROR  {copied} deliverable(s) → D: ({skipped} already current)')
+                f'BACKUP MIRROR  {copied} raw(s) → D: ({skipped} already current)')
+
+    def _expire_d_backup_raws(self) -> None:
+        """Delete D: raw-backup files older than the D_BACKUP_AGE window.
+
+        Shares its age boundary with `_mirror_raws_to_backup` so an expired file
+        is not re-mirrored. No-op when D: is the live primary (NAS down) — those
+        are real outputs, not backups. Undated files (age None) are never expired.
+        """
+        if self.media_root == self.mount_d:
+            return
+        pairs = [
+            (self.mount_d / 'video_archive', ('.mov',)),
+            (self.mount_d / 'audio',         ('.zip',)),
+        ]
+        stale = find_expired(
+            pairs, lambda p: (self._perf_age_days(p) or 0) > D_BACKUP_AGE)
+        removed = 0
+        for f in stale:
+            try:
+                f.unlink()
+                removed += 1
+                self.logger.info(f'EXPIRE D BACKUP  {f.name}  (>{D_BACKUP_AGE}d)')
+            except OSError as e:
+                self.logger.warning(f'EXPIRE D BACKUP  could not remove {f.name}: {e}')
+        if removed:
+            self.logger.info(f'EXPIRE D BACKUP  {removed} raw(s) removed (>{D_BACKUP_AGE}d)')
 
     # -----------------------------------------------------------------------
     # Trial summary
@@ -1341,8 +1390,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         if self.audio_dest.is_dir():
             for f in sorted(self.audio_dest.glob('*.zip')):
                 with _zipfile.ZipFile(f) as z:
-                    ch_count = sum(1 for n in z.namelist() if n.endswith('.wav'))
-                audio_lines.append(f"    {f.name}  ({ch_count} channel WAVs)")
+                    ch_count = sum(1 for n in z.namelist()
+                                   if n.endswith(('.wav', '.flac')))
+                audio_lines.append(f"    {f.name}  ({ch_count} channels)")
         if audio_lines:
             print(f"  {real_audio}/")
             for l in audio_lines:
@@ -1556,7 +1606,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     try:
                         with _zf.ZipFile(p) as zf:
                             rec['channel_count'] = sum(
-                                1 for nm in zf.namelist() if nm.lower().endswith('.wav')
+                                1 for nm in zf.namelist()
+                                if nm.lower().endswith(('.wav', '.flac'))
                             )
                     except Exception:
                         pass
@@ -2804,7 +2855,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             elif upstream == 'zip_empty':
                 self.logger.warning(
                     f"REEL  skipped for {base} — upstream REMASTER found an "
-                    f"empty ZIP (no WAVs inside {base}_MULTITRACK.zip)"
+                    f"empty ZIP (no channel audio inside {base}_MULTITRACK.zip)"
                 )
             elif upstream == 'mastering_error':
                 self.logger.warning(
@@ -3190,7 +3241,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
           EXPIRE RAW FILES    — 3600s  (1 hr)
           DEHYDRATE SWEEP     — 14400s (4 hr)
           FINISH INCOMPLETE   — 3600s  (1 hr)
-          BACKUP MIRROR       — 3600s  (1 hr) — N: .mp4/.mp3 deliverables → local D:
+          BACKUP MIRROR       — 3600s  (1 hr) — N: raw .mov/.zip → local D: (180-day backup)
+          EXPIRE D BACKUP     — 86400s (24 hr) — delete D: raws older than the 180-day window
           AUTO SCAN           — 3600s  (1 hr)
           AUTO CLEANUP        — 21600s (6 hr) — multi-job manifest, deduped by manifest key
         """
@@ -3206,7 +3258,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             ('EXPIRE RAW FILES',    '_expire_raw',   self._auto_expire_raw_files,      3600.0),
             ('DEHYDRATE SWEEP',     '_dehydrate',    self._dehydration_sweep,         14400.0),
             ('FINISH INCOMPLETE',   '_finish',       self._finish_incomplete_shows,    3600.0),
-            ('BACKUP MIRROR',       '_backup_mirror', self._mirror_deliverables_to_backup, 3600.0),
+            ('BACKUP MIRROR',       '_backup_mirror', self._mirror_raws_to_backup,       3600.0),
+            ('EXPIRE D BACKUP',     '_expire_d_raw', self._expire_d_backup_raws,       86400.0),
         ]
         for label, kind, fn, interval in tasks:
             last = self._last_scheduled_enqueued.get(label, 0.0)
@@ -3569,10 +3622,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
     def _enqueue_failback_reconcile(self, nas_root: pathlib.Path) -> None:
         """Catch up deliverables written to D: during a NAS outage, back up to N:.
 
-        Inverse of _mirror_deliverables_to_backup: copy-only D:→N: so anything
-        produced while the NAS was down lands on the primary, while N:-only files
-        survive untouched. Runs on the scheduled worker so it never blocks the
-        main loop.
+        Inverse of _mirror_raws_to_backup: copy-only D:→N: so anything produced
+        while the NAS was down lands on the primary, while N:-only files survive
+        untouched. Deliverables only (.mp4/.mp3) — the heavy raw tiers written to
+        D: during the outage are reconciled separately. Runs on the scheduled
+        worker so it never blocks the main loop.
         """
         pairs = [
             (self.mount_d / 'videos',        nas_root / 'videos'),
@@ -3582,7 +3636,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         ]
 
         def _reconcile() -> None:
-            copied, skipped = mirror_deliverables(pairs)
+            copied, skipped = mirror_files(pairs, DELIVERABLE_EXTS)
             self.logger.info(
                 f'FAILBACK RECONCILE  {copied} deliverable(s) D:→N: '
                 f'({skipped} already current)')

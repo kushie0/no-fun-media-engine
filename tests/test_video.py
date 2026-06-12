@@ -1,69 +1,18 @@
 """Unit tests for nofun/video.py (VideoMixin)."""
 
 import pathlib
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nofun.video import (
     CLIP_FILTER, MIN_QUAD, QUAD_FILTER, SINGLE_FILTER, STEP_SECONDS,
-    VideoMixin, build_encoder_config,
+    build_encoder_config,
 )
-from nofun.cleanup import CleanupMixin
 from nofun.script_runner import ScriptResult
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-class _FakePipeline(VideoMixin, CleanupMixin):
-    """Minimal stub that satisfies VideoMixin's required attributes."""
-    # Typed as Any so MagicMock assignments and mock assertions pass Pyright
-    logger:         Any
-    delete_queue:   Any
-    _pause_state:   Any
-    _app:           Any
-    _script_runner: Any
-
-    def __init__(self, tmp_path: pathlib.Path):
-        self.search_dir    = tmp_path
-        self.vids_dest     = tmp_path / 'videos'
-        self.clips_dest    = tmp_path / 'clips'
-        self.video_archive = tmp_path / 'archive'
-        self.logger        = MagicMock()
-        self.delete_queue  = MagicMock()
-        self.trial_run     = 0
-        self.force         = False
-        self.enc           = {
-            'accel':    [],
-            'enc_quad': ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18'],
-            'enc_clip': ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23'],
-        }
-        self.inventory_csv          = tmp_path / 'file_inventory.csv'
-        self.mount_d                = pathlib.Path('.')
-        self._app                  = None
-        self._pause_state          = MagicMock()
-        self._current_ffmpeg_procs: dict = {}
-        from nofun.script_runner import ScriptResult as _SR
-        self._script_runner = MagicMock()
-        self._script_runner.run.return_value = _SR(
-            script='encode_quads', exit_code=1,
-            stdout_json={}, stderr_tail='', elapsed=0.0,
-        )
-
-        for d in (self.vids_dest, self.clips_dest, self.video_archive):
-            d.mkdir(parents=True, exist_ok=True)
-
-    def _move_to_hard_paused(self, files):
-        pass
-
-    def _set_ffmpeg_proc(self, key: str, proc) -> None:
-        if proc is None:
-            self._current_ffmpeg_procs.pop(key, None)
-        else:
-            self._current_ffmpeg_procs[key] = proc
+from tests.fake_pipeline import FakePipeline as _FakePipeline
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +161,11 @@ class TestEncodeQuadrantsPreFlight:
     def _make_pipeline(self, tmp_path, encoder='libx264'):
         fp = _FakePipeline(tmp_path)
         fp.enc['enc_quad'] = ['-c:v', encoder, '-preset', 'ultrafast', '-crf', '18']
+        # Fail the (mocked) encode so the pre-flight gate is all that runs
+        fp._script_runner.run.return_value = ScriptResult(
+            script='encode_quads', exit_code=1,
+            stdout_json={}, stderr_tail='', elapsed=0.0,
+        )
         return fp
 
     def test_returns_false_and_logs_alert_when_too_small_for_amf(self, tmp_path):
@@ -640,6 +594,10 @@ class TestMjpegAccelBypass:
     def test_no_accel_configured_does_not_crash(self, tmp_path):
         fp = _FakePipeline(tmp_path)
         # fp.enc['accel'] is already [] in the stub
+        fp._script_runner.run.return_value = ScriptResult(
+            script='encode_quads', exit_code=1,
+            stdout_json={}, stderr_tail='', elapsed=0.0,
+        )
 
         with patch('nofun.video.probe_stream', return_value='h264'):
             result = fp._encode_quadrants(self._source(fp))
