@@ -383,9 +383,12 @@ class TestOrphanPidTracking:
     def test_stall_kills_tracked_pid(self, runner, tmp_path):
         """When ScriptRunner stall-kills, _tracked_ffmpeg_pid is cleared and result is killed."""
         script = tmp_path / 'stall_pid.py'
+        # Use !r so the Windows path interpolates as a properly-escaped Python
+        # string literal -- a bare "{sys.executable}" leaves a literal backslash
+        # which Python parses as an escape (\U... in C:\Users\... was the failure).
         script.write_text(textwrap.dedent(f'''\
             import subprocess, sys, time
-            p = subprocess.Popen(["{sys.executable}", '-c', 'import time; time.sleep(60)'])
+            p = subprocess.Popen([{sys.executable!r}, '-c', 'import time; time.sleep(60)'])
             sys.stderr.write(f'ffmpeg_pid={{p.pid}}\\n')
             sys.stderr.flush()
             time.sleep(60)  # no more stderr output -- triggers stall

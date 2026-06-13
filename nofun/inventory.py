@@ -6,6 +6,8 @@ __all__ = [
     'extract_date_band_from_path',
     'short_date',
     'perf_key',
+    'perf_output_name',
+    'OUTPUT_SUFFIXES',
     'classify_file',
     'classify_location',
     'build_performance_states',
@@ -169,6 +171,25 @@ def perf_key(date: str, band: str) -> str:
     """Canonical performance identity: '<YY-MM-DD>_<band>'. The single source of
     truth for the DB key, ZIP stem, reconciler key, and status map."""
     return f'{short_date(date)}_{band}'
+
+
+# Canonical final-output suffixes per kind. Single source of truth shared by
+# producers and tests — a test that imports these can never hold a stale name.
+OUTPUT_SUFFIXES = {
+    'multitrack': '_MULTITRACK.zip',
+    'audio':      '_AUDIO.mp3',
+    'reel':       '_INSTAGRAM.mp4',
+}
+
+
+def perf_output_name(key: str, kind: str, cam: str = '') -> str:
+    """Canonical final-output filename for a perf key (or quad base).
+
+    kind: 'multitrack' | 'audio' | 'reel' | 'quad' (quad needs cam, e.g. 'CAM1').
+    """
+    if kind == 'quad':
+        return f'{key}_{cam}.mp4'
+    return key + OUTPUT_SUFFIXES[kind]
 
 
 def files_for_perf(

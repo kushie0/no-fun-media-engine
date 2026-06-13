@@ -63,6 +63,7 @@ def main() -> None:
 
     # Build ffmpeg command
     quads = [('CAM1', 'ul'), ('CAM2', 'ur'), ('CAM3', 'll'), ('CAM4', 'lr')]
+    # Must match nofun/video.py quad_temp_name() — this script stays stdlib-only.
     temps = {q: str(dest_dir / f'{args.base}_{q}_temp.mp4') for q, _ in quads}
 
     tlim = ['-t', str(args.trial)] if args.trial else []

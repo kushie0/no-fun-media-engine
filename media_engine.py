@@ -66,7 +66,7 @@ from nofun.cleanup import (
 from nofun.encoding_db import EncodingDB
 from nofun.inventory import (
     EXPIRE_AGE, RAW_EXPIRE_AGE, D_BACKUP_AGE, extract_date_band, files_for_perf,
-    perf_key, short_date, _status_label, _STATUS_ICON,
+    perf_key, perf_output_name, short_date, _status_label, _STATUS_ICON,
 )
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory, JobQueue
@@ -2844,7 +2844,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         """
         from nofun.reel import generate_reel
         base    = perf  # perf key matches zip/audio base name
-        fullset = self.audio_dest / f'{base}_AUDIO.mp3'
+        fullset = self.audio_dest / perf_output_name(base, 'audio')
         if not fullset.exists():
             upstream = self._remaster_status.get(perf)
             if upstream == 'no_zip':
@@ -2888,7 +2888,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     f"REEL  skipped for {real_base} — missing quad(s): {', '.join(missing)}"
                 )
                 continue
-            out = self.vids_dest / f'{real_base}_INSTAGRAM.mp4'
+            out = self.vids_dest / perf_output_name(real_base, 'reel')
             self.logger.info(f"REEL  {out.stem}")
             self._set_op('remaster', f'REEL  {out.stem}')
             _HB_INTERVAL = 60.0

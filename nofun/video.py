@@ -11,6 +11,7 @@ __all__ = [
     'CLIP_FILTER',
     'MIN_QUAD',
     'SINGLE_FILTER',
+    'quad_temp_name',
 ]
 
 import json
@@ -22,6 +23,7 @@ import subprocess
 import time
 from typing import TYPE_CHECKING
 
+from nofun.inventory import perf_output_name
 from nofun.media_io import DeleteQueue, _DIM, _CYAN, _YELLOW, _R, fmt_size, probe_format, probe_stream, probe_total_frames
 from nofun.paths import detect_platform
 from nofun.script_runner import ScriptRunner, ScriptJob
@@ -38,6 +40,14 @@ if TYPE_CHECKING:
 
 # Ordered: index → cloud label. UL→CAM1, UR→CAM2, LL→CAM3, LR→CAM4.
 CAM_LABELS = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
+
+
+def quad_temp_name(base: str, cam: str) -> str:
+    """Intermediate quad name encode_quads.py writes, renamed to final on success.
+
+    Must match scripts/encode_quads.py (stateless, stdlib-only — keeps its own copy).
+    """
+    return f'{base}_{cam}_temp.mp4'
 
 STEP_SECONDS = 40
 
@@ -184,8 +194,8 @@ class VideoMixin:
     def _encode_quadrants(self, source: pathlib.Path) -> bool:
         base  = source.stem
         quads = CAM_LABELS
-        temps = {q: self.vids_dest / f'{base}_{q}_temp.mp4' for q in quads}
-        dests = {q: self.vids_dest / f'{base}_{q}.mp4'      for q in quads}
+        temps = {q: self.vids_dest / quad_temp_name(base, q) for q in quads}
+        dests = {q: self.vids_dest / perf_output_name(base, 'quad', q) for q in quads}
 
         # MJPEG safety: d3d11va hardware decode corrupts MJPEG frames
         src_codec = probe_stream(source, 'codec_name')

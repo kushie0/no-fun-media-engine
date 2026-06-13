@@ -15,6 +15,7 @@ from nofun.inventory import (
     extract_date_band_from_path,
     files_for_perf,
     perf_key,
+    perf_output_name,
     rows_from_db,
     scan_files,
     short_date,
@@ -71,6 +72,27 @@ class TestPerfKey:
         # sub-performance suffix must survive untouched, never merged away.
         assert perf_key('26-03-14', 'THE_OBSESSED_ENCORE') == '26-03-14_THE_OBSESSED_ENCORE'
         assert perf_key('26-03-14', 'THE_OBSESSED_SOUNDCHECK') == '26-03-14_THE_OBSESSED_SOUNDCHECK'
+
+
+class TestPerfOutputName:
+    """Canonical final-output naming — the shared anchor producers and tests import."""
+
+    def test_multitrack(self):
+        assert perf_output_name('26-03-11_DAISY_CHAIN', 'multitrack') == \
+            '26-03-11_DAISY_CHAIN_MULTITRACK.zip'
+
+    def test_audio(self):
+        assert perf_output_name('26-04-11_ALTAR', 'audio') == '26-04-11_ALTAR_AUDIO.mp3'
+
+    def test_reel(self):
+        assert perf_output_name('26-04-11_ALTAR', 'reel') == '26-04-11_ALTAR_INSTAGRAM.mp4'
+
+    def test_quad_requires_cam(self):
+        assert perf_output_name('26-04-11_ALTAR', 'quad', 'CAM2') == '26-04-11_ALTAR_CAM2.mp4'
+
+    def test_unknown_kind_raises(self):
+        with pytest.raises(KeyError):
+            perf_output_name('26-04-11_ALTAR', 'poster')
 
 
 class TestExtractDateBandFromPath:

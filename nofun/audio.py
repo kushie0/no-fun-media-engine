@@ -15,7 +15,7 @@ import zlib
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from nofun.inventory import extract_date_band, perf_key
+from nofun.inventory import extract_date_band, perf_key, perf_output_name
 from nofun.media_io import DeleteQueue, fmt_size, format_eta, probe_stream
 from nofun.paths import NULL_DEV
 from nofun.script_runner import ScriptRunner, ScriptJob
@@ -31,6 +31,14 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 MIN_ACTIVE_SECONDS = 5   # seconds — channels with less signal than this are dropped
+
+
+def chan_wav_name(base: str, ch: int) -> str:
+    """Channel-split WAV name the split_audio script writes (1-based channel).
+
+    Must match scripts/split_audio.py (stateless, stdlib-only — keeps its own copy).
+    """
+    return f'{base}_ch{ch:02d}.wav'
 
 # Sentinel returned by _encode_one_flac when a file disappears or fails to encode
 # mid-ZIP. arcname='' signals the caller to skip this entry and log it as dropped.
@@ -255,7 +263,7 @@ class AudioMixin:
                 continue
 
             base = f.stem
-            if (f.parent / f'{base}_ch01.wav').exists() and not self.force:
+            if (f.parent / chan_wav_name(base, 1)).exists() and not self.force:
                 # Split already done; ensure original is gone from search_dir.
                 if not self.trial_run and self.mount_d != pathlib.Path('.'):
                     self._archive_or_dedup(f, self.audio_archive)
@@ -297,7 +305,7 @@ class AudioMixin:
 
                 # ---- Batch silence detection ----
                 ch_files = [
-                    f.parent / f'{base}_ch{ch+1:02d}.wav'
+                    f.parent / chan_wav_name(base, ch + 1)
                     for ch in range(num_ch)
                 ]
                 ch_files = [cf for cf in ch_files if cf.exists()]
@@ -341,7 +349,7 @@ class AudioMixin:
             else:
                 self.logger.error(f"Audio split failed for {base}")
                 partial = [
-                    f.parent / f'{base}_ch{ch+1:02d}.wav'
+                    f.parent / chan_wav_name(base, ch + 1)
                     for ch in range(num_ch)
                 ]
                 partial = [p for p in partial if p.exists()]
@@ -517,7 +525,7 @@ class AudioMixin:
             drive is mounted: 'delete' queues them; 'archive' moves them to
             audio_archive.
         """
-        zip_path = zip_dest / f'{group_key}_MULTITRACK.zip'
+        zip_path = zip_dest / perf_output_name(group_key, 'multitrack')
         if zip_path.exists() and not self.force:
             self.logger.debug(f"SKIP    {zip_path.name} (exists)")
             for f in files:

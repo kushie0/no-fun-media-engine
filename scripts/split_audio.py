@@ -80,6 +80,7 @@ def main() -> None:
     for ch in range(num_ch):
         pad = f'{ch + 1:02d}'
         filt += f';[a{ch}]pan=mono|c0=c{ch}[c{ch}]'
+        # Must match nofun/audio.py chan_wav_name() — this script stays stdlib-only.
         out_path = str(dest_dir / f'{args.base}_ch{pad}.wav')
         maps += ['-map', f'[c{ch}]', '-c:a', 'pcm_s24le', out_path]
         output_files.append(out_path)

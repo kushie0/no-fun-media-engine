@@ -5,8 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nofun.inventory import perf_output_name
 from nofun.video import (
-    CLIP_FILTER, MIN_QUAD, QUAD_FILTER, SINGLE_FILTER, STEP_SECONDS,
+    CAM_LABELS, quad_temp_name, CLIP_FILTER, MIN_QUAD, QUAD_FILTER, SINGLE_FILTER, STEP_SECONDS,
     build_encoder_config,
 )
 from nofun.script_runner import ScriptResult
@@ -57,9 +58,9 @@ class TestEncodeQuadrants:
         source.write_bytes(b'\x00')
 
         base  = source.stem
-        quads = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
+        quads = CAM_LABELS
         for q in quads:
-            (fp.vids_dest / f'{base}_{q}_temp.mp4').write_bytes(b'\x00')
+            (fp.vids_dest / quad_temp_name(base, q)).write_bytes(b'\x00')
 
         fp._script_runner.run.return_value = ScriptResult(
             script='encode_quads', exit_code=1,
@@ -71,7 +72,7 @@ class TestEncodeQuadrants:
 
         assert result is False
         for q in quads:
-            assert not (fp.vids_dest / f'{base}_{q}_temp.mp4').exists()
+            assert not (fp.vids_dest / quad_temp_name(base, q)).exists()
 
     def test_renames_temp_to_final_on_success(self, tmp_path):
         """When the script returns 0, _temp files are renamed to final names."""
@@ -79,11 +80,11 @@ class TestEncodeQuadrants:
         source = tmp_path / '26-01-01_TestBand.mov'
         source.write_bytes(b'\x00')
         base  = source.stem
-        quads = ('CAM1', 'CAM2', 'CAM3', 'CAM4')
+        quads = CAM_LABELS
 
         def _fake_run(job, progress_cb=None, proc_cb=None, clip_progress_cb=None):
             for q in quads:
-                (fp.vids_dest / f'{base}_{q}_temp.mp4').write_bytes(b'\x00')
+                (fp.vids_dest / quad_temp_name(base, q)).write_bytes(b'\x00')
             return ScriptResult(
                 script='encode_quads', exit_code=0,
                 stdout_json={}, stderr_tail='', elapsed=0.0,
@@ -96,8 +97,8 @@ class TestEncodeQuadrants:
 
         assert result is True
         for q in quads:
-            assert (fp.vids_dest / f'{base}_{q}.mp4').exists()
-            assert not (fp.vids_dest / f'{base}_{q}_temp.mp4').exists()
+            assert (fp.vids_dest / perf_output_name(base, 'quad', q)).exists()
+            assert not (fp.vids_dest / quad_temp_name(base, q)).exists()
 
     def test_db_record_quads_writes_runtime_seconds(self, tmp_path):
         """After upserting all four quads, runtime_seconds is cached at band level."""
@@ -106,7 +107,7 @@ class TestEncodeQuadrants:
         fp = _FakePipeline(tmp_path)
         fp._encoding_db = EncodingDB(tmp_path / 'encoding_db.json')
         base = '26-01-01_TestBand'
-        dests = {q: fp.vids_dest / f'{base}_{q}.mp4' for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4')}
+        dests = {q: fp.vids_dest / perf_output_name(base, 'quad', q) for q in CAM_LABELS}
         for p in dests.values():
             p.write_bytes(b'\x00')
 
@@ -264,7 +265,7 @@ class TestEncodeQuadrantsPreFlight:
 
 def _make_quad(fp: _FakePipeline, base: str, quad: str) -> pathlib.Path:
     """Write a dummy quad MP4 to fp.vids_dest."""
-    p = fp.vids_dest / f'{base}_{quad}.mp4'
+    p = fp.vids_dest / perf_output_name(base, 'quad', quad)
     p.write_bytes(b'\x00' * 16)
     return p
 
@@ -388,7 +389,7 @@ class TestExportClips:
         base = self._BASE
         # CAM1 has 2 clips, CAM2 has 5 — CAM1 is behind; it should walk from 1
         # (the script skips clips already on disk), not resume past the count.
-        for q in ('CAM1', 'CAM2'):
+        for q in CAM_LABELS[:2]:
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir()
@@ -421,7 +422,7 @@ class TestExportClips:
         import json
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        for q in ('CAM1', 'CAM2'):
+        for q in CAM_LABELS[:2]:
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir()
@@ -453,11 +454,11 @@ class TestExportClips:
         """All quads at same count → skip without calling runner."""
         fp   = _FakePipeline(tmp_path)
         base = self._BASE
-        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
+        for q in CAM_LABELS:
             _make_quad(fp, base, q)
         clips_dir = fp.clips_dest / base
         clips_dir.mkdir()
-        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
+        for q in CAM_LABELS:
             for i in range(1, 6):
                 (clips_dir / f'{base}_{q}_{i}.mp4').write_bytes(b'\x00')
 
@@ -474,7 +475,7 @@ class TestProcessMov:
     _BASE = '26-01-01_TestBand'
 
     def _make_all_quads(self, fp: _FakePipeline) -> None:
-        for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
+        for q in CAM_LABELS:
             _make_quad(fp, self._BASE, q)
 
     def test_skips_encode_when_all_quads_exist(self, tmp_path):

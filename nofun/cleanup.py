@@ -19,6 +19,7 @@ from nofun.inventory import (
     classify_location,
     extract_date_band,
     perf_key,
+    perf_output_name,
     scan_files,
 )
 from nofun.media_io import DeleteQueue, fmt_size
@@ -823,7 +824,7 @@ class CleanupMixin:
         Checks: file exists, non-zero size, zipfile.namelist() returns ≥1 entry.
         BadZipFile and OSError both return False — raw file is kept.
         """
-        zip_path = self.audio_dest / f'{perf_key}_MULTITRACK.zip'
+        zip_path = self.audio_dest / perf_output_name(perf_key, 'multitrack')
         if not zip_path.exists() or zip_path.stat().st_size == 0:
             return False
         try:
