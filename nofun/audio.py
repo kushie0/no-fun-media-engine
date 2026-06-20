@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import datetime
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -421,7 +422,15 @@ class AudioMixin:
         rather than failing the whole job. success is True iff the resulting
         ZIP exists and contains every surviving file's arcname.
         """
-        n_workers = 4
+        # Parallel FLAC encoders. Each worker is one ffmpeg `-compression_level 8`
+        # subprocess (≈1 core), so CPU load scales ~linearly with this count: 4
+        # workers saturated the box (~92%). Capped to 2 by default (~50% CPU) to
+        # leave headroom on show night; raise FLAC_ZIP_WORKERS to trade CPU for
+        # faster zips. Takes effect on the next engine restart.
+        try:
+            n_workers = max(1, int(os.environ.get('FLAC_ZIP_WORKERS') or 2))
+        except ValueError:
+            n_workers = 2
         _preexisted = zip_path.exists()
         dropped: list[pathlib.Path] = []
 

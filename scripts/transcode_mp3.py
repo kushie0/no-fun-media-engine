@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Transcode a WAV file to MP3 using libmp3lame.
+"""Transcode a WAV file to MP3 using libmp3lame (VBR).
 
 Equivalent bash:
     ffmpeg -y -hide_banner -loglevel error \\
         -i SOURCE.wav \\
-        -c:a libmp3lame -b:a 128k -q:a 2 \\
+        -c:a libmp3lame -q:a 2 \\
         DEST.mp3
+
+-q:a 2 is LAME VBR ~190 kbps — far better high-frequency retention on dense,
+cymbal-heavy live recordings than 128k CBR, for a negligible size increase.
 
 Exit codes: 0 = success, 1 = ffmpeg error, 2 = input missing
 """
@@ -21,7 +24,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',   required=True,            help='Input WAV path')
     p.add_argument('--dest',     required=True,            help='Output MP3 path')
-    p.add_argument('--bitrate',  default='128k',           help='CBR bitrate (default 128k)')
+    p.add_argument('--quality',  default='2',              help='LAME VBR quality -q:a (default 2 ≈ 190 kbps)')
     p.add_argument('--dry-run',  action='store_true',      help='Print command without executing')
     args = p.parse_args()
 
@@ -36,7 +39,7 @@ def main() -> None:
         'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
         '-progress', 'pipe:2', '-nostats',
         '-i', str(source),
-        '-c:a', 'libmp3lame', '-b:a', args.bitrate, '-q:a', '2',
+        '-c:a', 'libmp3lame', '-q:a', args.quality,
         str(dest),
     ]
 

@@ -282,7 +282,11 @@ class PerformanceState:
     def recording_date(self) -> datetime.date | None:
         try:
             parts = self.date.split('-')
-            return datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+            # date is YY-MM-DD (2-digit year) — offset to the 2000s, matching
+            # _perf_age_days / _finish_incomplete_shows. Without the +2000 the
+            # year parses as e.g. 26 AD, making age_days ~730k and every show
+            # read as overdue / never "recent".
+            return datetime.date(2000 + int(parts[0]), int(parts[1]), int(parts[2]))
         except (ValueError, IndexError):
             return None
 

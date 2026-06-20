@@ -69,30 +69,42 @@ def _write_stored_zip(out_path: pathlib.Path,
             zf.writestr(arcname, data)
 
 
-def _convert_one(zip_path: pathlib.Path, apply: bool) -> tuple[bool, int, int]:
-    """Convert one WAV-zip to FLAC. Returns (changed, old_bytes, new_bytes)."""
+def _convert_one(zip_path: pathlib.Path, apply: bool,
+                 staged: bool = False) -> tuple[bool, int, int]:
+    """Convert one WAV-zip to FLAC. Returns (changed, old_bytes, new_bytes).
+
+    staged=True: write the FLAC alongside as '<name>.zip.FLAC' and KEEP the WAV
+    zip untouched — for the gated-deletion workflow (a later approval step deletes
+    the WAV zip and renames the .FLAC into place). Resumable: skips if already staged.
+    """
     old_bytes = zip_path.stat().st_size
     try:
-        return _convert_one_inner(zip_path, apply, old_bytes)
+        return _convert_one_inner(zip_path, apply, old_bytes, staged)
     except (zipfile.BadZipFile, EOFError, zlib.error, OSError) as e:
         print(f"  BAD   {zip_path.name}  (unreadable: {e}) — left untouched")
         return False, old_bytes, old_bytes
 
 
 def _convert_one_inner(zip_path: pathlib.Path, apply: bool,
-                       old_bytes: int) -> tuple[bool, int, int]:
+                       old_bytes: int, staged: bool = False) -> tuple[bool, int, int]:
     if _zip_has_flac(zip_path):
         print(f"  SKIP  {zip_path.name}  (already FLAC)")
+        return False, old_bytes, old_bytes
+    staged_dest = zip_path.with_name(zip_path.name + '.FLAC')
+    if staged and staged_dest.exists():
+        print(f"  SKIP  {zip_path.name}  (already staged: {staged_dest.name})")
         return False, old_bytes, old_bytes
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = pathlib.Path(tmp)
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(tmp_path)
-        # Engine WAVs are '<perf>_chanN.wav' — match anywhere in the name
-        wavs = sorted(tmp_path.glob('*chan*.wav'))
+        # Match ALL .wav members — the back-catalog uses several channel-naming
+        # conventions (_chanN, _chNN, .N). The 'extras' check below still skips any
+        # zip that also contains non-WAV members (mixed / metadata zips).
+        wavs = sorted(tmp_path.glob('*.wav'))
         if not wavs:
-            print(f"  SKIP  {zip_path.name}  (no chan*.wav inside)")
+            print(f"  SKIP  {zip_path.name}  (no .wav inside)")
             return False, old_bytes, old_bytes
         extras = [p for p in tmp_path.rglob('*') if p.is_file() and p not in wavs]
         if extras:
@@ -126,9 +138,14 @@ def _convert_one_inner(zip_path: pathlib.Path, apply: bool,
         staging = zip_path.with_suffix('.zip.tmp')
         _write_stored_zip(staging, entries)
         actual_new = staging.stat().st_size
-        staging.replace(zip_path)        # atomic — old zip only now gone
-        print(f"  OK    {zip_path.name}  {old_bytes/1e6:.1f}MB -> "
-              f"{actual_new/1e6:.1f}MB")
+        if staged:
+            staging.replace(staged_dest)     # WAV zip kept; FLAC staged alongside
+            print(f"  STAGED {zip_path.name} -> {staged_dest.name}  "
+                  f"{old_bytes/1e6:.1f}MB -> {actual_new/1e6:.1f}MB  (WAV kept)")
+        else:
+            staging.replace(zip_path)        # atomic — old zip only now gone
+            print(f"  OK    {zip_path.name}  {old_bytes/1e6:.1f}MB -> "
+                  f"{actual_new/1e6:.1f}MB")
         return True, old_bytes, actual_new
 
 

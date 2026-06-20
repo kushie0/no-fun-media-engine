@@ -31,6 +31,17 @@ def test_two_digit_year_age_is_sane():
     assert (datetime.date.today() - broken).days > 700_000
 
 
+def test_performance_state_age_days_is_sane():
+    # The site missed by commit 59d013b: PerformanceState.recording_date built
+    # year 26 AD, so age_days read ~730k -> every show looked overdue in
+    # INVENTORY and never "recent" in the 7-day report. Pins the 2000+ offset
+    # on the property itself, not just the standalone arithmetic above.
+    from nofun.inventory import PerformanceState
+    ps = PerformanceState(date='26-05-24', band='LASTIMA')
+    assert ps.recording_date == datetime.date(2026, 5, 24)
+    assert ps.age_days is not None and 0 <= ps.age_days < 365 * 5
+
+
 def test_remaster_cloud_name_strips_multitrack():
     # Bug 3: the remaster AUDIO must overwrite the original <BAND>_AUDIO.mp3,
     # so the cloud filename drops both the date prefix and the _MULTITRACK tag.

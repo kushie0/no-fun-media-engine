@@ -11,15 +11,18 @@ param(
         [int]$PlaylistSize  = 500,
         # Playlist composition (VLC --random picks one slot per item; clips are
         # STEP_SECONDS=40 s long, so picks/min = 1.5).
-        # Tonight: clips whose filename date prefix matches the latest gig date
-        #   in the tree — sized for ~1 tonight pick/min/stream (0.67 × 1.5 ≈ 1.0).
-        #   Picking by filename, not mtime, avoids confusing tonight with "any
-        #   clip processed in the last 24 h" (re-encodes and older shows).
+        # Tonight: clips whose filename date prefix matches TODAY's calendar date
+        #   — sized for ~0.5 tonight pick/min/stream (0.33 × 1.5 ≈ 0.5). Matching
+        #   today's date (not the newest prefix in the tree) keeps last night's gig
+        #   out of the bucket; before tonight's clips exist it's empty and falls
+        #   through to recent/library.
         # Recent: clips with mtime in the last RecentDays, excluding tonight.
         # Library: everything else; fills slack so playlists never under-fill.
-        [double]$TodayShare  = 0.67,
+        # Shares are an even split: tonight / recent / library ≈ 33 / 33 / 34
+        # (library is the implicit remainder = 1 − TodayShare − RecentShare).
+        [double]$TodayShare  = 0.33,
         [int]$RecentDays    = 21,
-        [double]$RecentShare = 0.13
+        [double]$RecentShare = 0.33
 )
 
 $host.UI.RawUI.WindowTitle = "NOFUN Streams"
@@ -32,21 +35,12 @@ if (-not $mutex.WaitOne(0)) {
         exit 1
 }
 
-# Skip if the clip tree hasn't changed since the last refresh AND all the
-# expected VLCs are still alive. Lets a scheduled task fire every N minutes
-# without disturbing screens when there's nothing new to fold in. Cold start
-# (no playlist yet) and any missing VLC fall through to a normal refresh.
-$plistRef = "$env:TEMP\pls_$BasePort.m3u"
-$vlcCount = @(Get-Process vlc -ErrorAction SilentlyContinue).Count
-if ((Test-Path $plistRef) -and $vlcCount -ge $StreamCount) {
-        $clipMtime = (Get-ChildItem $ClipRoot -Directory -ErrorAction SilentlyContinue |
-                Measure-Object LastWriteTime -Maximum).Maximum
-        $plistMtime = (Get-Item $plistRef).LastWriteTime
-        if ($clipMtime -and $clipMtime -le $plistMtime) {
-                Write-Host "No new clips since $plistMtime ($vlcCount VLCs alive) - skipping refresh"
-                exit 0
-        }
-}
+# Always rebuild on every invocation. The RefreshStreams task fires every 30 min
+# and each playlist is only a random PlaylistSize-clip subset of the library, so we
+# re-sample a fresh subset each run for variety — even when no new clips were added.
+# (The old skip-guard exited early when the clip tree was unchanged, which froze the
+# same subset on screen for hours.) The Mutex above still blocks overlapping runs,
+# and the staggered per-port restart below keeps each screen dark only ~3 s at a time.
 
 # Each port's VLC is killed and replaced inside the loop below (staggered
 # refresh) — a rebuild blanks one venue screen for a few seconds at a time
@@ -70,20 +64,15 @@ $localIPs = Get-LocalIPs
 $allClips = @(Get-ChildItem -Path $ClipRoot -Recurse -Filter *.mp4 |
         Where-Object { $_.DirectoryName -ne $ClipRoot })
 
-# Tonight = clips whose filename starts with the latest yy-MM-dd_ prefix in the
-# tree. yy-MM-dd sorts correctly as a string, so the max prefix is the newest
-# gig date — auto-discovered, no hand-tweaking. Clips without a date prefix
-# (e.g. legacy NoFun.0 folders) just can't be in the tonight bucket.
-$tonightPrefix = ''
-foreach ($c in $allClips) {
-        if ($c.Name -match '^(\d\d-\d\d-\d\d)_') {
-                if ($matches[1] -gt $tonightPrefix) { $tonightPrefix = $matches[1] }
-        }
-}
-$todayClips = @()
-if ($tonightPrefix) {
-        $todayClips = @($allClips | Where-Object { $_.Name -like "$tonightPrefix*" })
-}
+# Tonight = clips whose filename date prefix matches TODAY's calendar date.
+# Filenames are yy-MM-dd_… so we match the current date directly rather than the
+# newest prefix in the tree — that older "max prefix" logic grabbed last night's
+# gig whenever tonight's clips didn't exist yet. Before tonight's show is
+# recorded/encoded the bucket is simply empty and falls through to recent/library;
+# it never falls back to last night. A set running past midnight (filed under its
+# start date) stops counting once the date rolls over.
+$tonightPrefix = (Get-Date).ToString('yy-MM-dd')
+$todayClips = @($allClips | Where-Object { $_.Name -like "$tonightPrefix*" })
 
 # Recent: by mtime, last RecentDays. Exclude tonight to avoid double-counting.
 $recentCut   = (Get-Date).AddDays(-$RecentDays)

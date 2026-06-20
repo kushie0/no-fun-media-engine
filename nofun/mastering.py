@@ -42,7 +42,10 @@ SELECTED_PANS: dict[int, float] = {
 }
 
 # Per-channel OTT knobs  (applied to every channel before mixing)
-OTT_CH_DEPTH:       float = 70.0   # overall effect amount      (0–100); 70 = "35" preset
+# Default profile is the "live-energy" master (v4C, 2026-06-13): low OTT depth so
+# the band breathes, board carries vocals/presence, room re-added as controlled
+# energy (HPF + parallel crush + M/S pocket + micro-upward). See _mix_channels.
+OTT_CH_DEPTH:       float = 15.0   # overall effect amount      (0–100); low = glue not crush
 OTT_CH_UPWD_STRGTH: float = 100.0  # upward compression         (0–200)
 OTT_CH_DNWD_STRGTH: float = 100.0  # downward compression       (0–200)
 OTT_CH_THRESH_L:    float = 100.0  # low-band threshold         (0–200)
@@ -75,11 +78,11 @@ DYERS_FFT: int = 4096
 DYERS_ENV_BINS: int = 65
 
 # Master bus OTT knobs  (applied to the stereo mix after channel summing)
-OTT_MASTER_DEPTH:       float = 100.0  # overall effect amount  (0–100)
+OTT_MASTER_DEPTH:       float = 20.0   # overall effect amount  (0–100); low = glue not pump
 OTT_MASTER_IN_GAIN_DB:  float = -10.0  # input gain             (-54–+19 dB)
 OTT_MASTER_OUT_GAIN_DB: float =   2.0  # output gain            (-54–+19 dB)
-# upward compression     (0–200); 0 = downward only
-OTT_MASTER_UPWD_STRGTH: float = 100.0
+# upward compression     (0–200); 0 = downward only (no master pumping)
+OTT_MASTER_UPWD_STRGTH: float = 0.0
 OTT_MASTER_DNWD_STRGTH: float = 100.0  # downward compression   (0–200)
 OTT_MASTER_THRESH_L:    float = 100.0  # low-band threshold     (0–200)
 OTT_MASTER_THRESH_M:    float = 100.0  # mid-band threshold     (0–200)
@@ -88,25 +91,36 @@ OTT_MASTER_GAIN_L_DB:   float = 0.0  # low-band output level  (-inf–+6 dB)
 OTT_MASTER_GAIN_M_DB:   float = 0.0  # mid-band output level  (-inf–+6 dB)
 OTT_MASTER_GAIN_H_DB:   float = -1.0  # high-band output level (-inf–+6 dB)
 
-# Room channels (29=L, 30=R) — dominant in mix, maximum squish
-# Up/down at 200 (max) for hard compression in both directions.
-# L pulled back to cede bass to board; M/H boosted for room dominance.
+# Room channels (29=L, 30=R) — spatial glue + crowd energy, NOT vocal carrier.
+# EQ neutral (the HPF + parallel crush + M/S pocket below do the shaping); upward
+# compression kept high to lift low-level crowd/cheers above the dry board feed.
 ROOM_CHANNELS:           list[int] = [29, 30]
-OTT_ROOM_UPWD_STRGTH:    float = 200.0   # max upward compression   (0–200)
-OTT_ROOM_DNWD_STRGTH:    float = 200.0   # max downward compression (0–200)
-OTT_ROOM_GAIN_L_DB:      float = -3.0    # pull back bass (board owns ~70%)
-OTT_ROOM_GAIN_M_DB:      float =  6.0    # push presence / vocals ("35" preset)
-OTT_ROOM_GAIN_H_DB:      float =  5.0    # push air ("35" preset)
+OTT_ROOM_UPWD_STRGTH:    float = 120.0   # high upward comp — lifts crowd/cheers (0–200)
+OTT_ROOM_DNWD_STRGTH:    float = 100.0   # downward compression (0–200)
+OTT_ROOM_GAIN_L_DB:      float =  0.0    # neutral — HPF handles the low end
+OTT_ROOM_GAIN_M_DB:      float =  0.0    # neutral — M/S pocket carves vocal space
+OTT_ROOM_GAIN_H_DB:      float =  0.0    # neutral
 
-# Board channels (31=L, 32=R) — bass-forward, vocal-reduced
-# Softer downward compression preserves bass transient punch.
-# L=+4 vs room L=−3 → ~69% bass contribution; M=−5 → ~25% vocal.
+# Board channels (31=L, 32=R) — vocals, presence, transients live here (X32 mains).
 BOARD_CHANNELS:          list[int] = [31, 32]
-OTT_BOARD_UPWD_STRGTH:   float = 100.0   # normal upward compression
+OTT_BOARD_UPWD_STRGTH:   float = 30.0    # gentle upward compression
 OTT_BOARD_DNWD_STRGTH:   float =  80.0   # softer downward (preserve bass punch)
-OTT_BOARD_GAIN_L_DB:     float =  4.0    # heavy bass boost
-OTT_BOARD_GAIN_M_DB:     float = -8.0    # cut mids / vocals ("35" preset)
-OTT_BOARD_GAIN_H_DB:     float = -7.0    # cut highs ("35" preset)
+OTT_BOARD_GAIN_L_DB:     float =  3.0    # bass weight
+OTT_BOARD_GAIN_M_DB:     float =  3.0    # vocal clarity / midrange bite
+OTT_BOARD_GAIN_H_DB:     float =  2.0    # presence / air
+
+# Room-energy routing (v3/v4) — re-adds live room/crowd cleanly without the comb
+# filtering of the old Haas spread. Applied in _mix_channels; CLI-overridable via
+# --room-hpf / --room-parallel-crush / --bus-ms-scoop / --room-upwd / --room-mix.
+ROOM_HPF_HZ:          float = 175.0   # high-pass room ch so it can be pushed loud without low-end mud
+# v5: pump the room ch up in the final L/R blend — the board (31/32) is the clean vocal/
+# presence carrier, so lifting room here adds live ambience/grit without touching the board.
+# Applied post-OTT, pre-pan in _mix_channels. CLI-overridable via --room-mix.
+ROOM_MIX_GAIN_DB:     float = 4.5     # room level in the L/R blend (dB); board unchanged
+ROOM_PARALLEL_CRUSH:  float = 0.35    # blend a fast-release crushed parallel room bus (NY style) for density
+BUS_MS_SCOOP_DB:      float = -2.5    # M/S mid scoop on final mix — pockets the board vocal, keeps room wide
+BUS_MS_SCOOP_FREQ:    float = 1400.0  # centre of the vocal-pocket scoop (Hz)
+BUS_MS_SCOOP_Q:       float = 1.0     # width of the scoop (lower = wider)
 
 
 OTT_PATHS: dict[str, list[str]] = {
@@ -219,8 +233,8 @@ def _write_stereo_mp3(
 ) -> None:
     """Write a stereo MP3 via a temporary WAV → ffmpeg transcode.
 
-    Uses 128 kbps CBR (libmp3lame).  Adequate quality for live concert
-    recordings and ~22× smaller than 32-bit float WAV at 44.1 kHz.
+    Uses LAME VBR -q:a 2 (~190 kbps) — retains the cymbal/HF detail that 128 kbps
+    CBR smears on dense live recordings, still ~15× smaller than 32-bit float WAV.
 
     When *script_runner* is provided the transcode runs through
     ``scripts/transcode_mp3.py`` instead of an inline subprocess call.
@@ -236,7 +250,7 @@ def _write_stereo_mp3(
             from nofun.script_runner import ScriptJob
             job = ScriptJob(
                 script='transcode_mp3',
-                args={'source': str(tmp), 'dest': str(path), 'bitrate': '128k'},
+                args={'source': str(tmp), 'dest': str(path)},
                 label=f'MP3  {path.name}',
             )
             result = script_runner.run(job)
@@ -248,7 +262,7 @@ def _write_stereo_mp3(
             subprocess.run(
                 ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                  '-i', str(tmp),
-                 '-c:a', 'libmp3lame', '-b:a', '128k', '-q:a', '2',
+                 '-c:a', 'libmp3lame', '-q:a', '2',
                  str(path)],
                 check=True,
             )
@@ -320,6 +334,83 @@ def _denoise_mono(mono: np.ndarray, sr: int, nr: float = 10.0, nf: float = -50.0
     if len(out) < N:
         out = np.pad(out, (0, N - len(out)))
     return out[:N]
+
+
+def _highpass_mono(mono: np.ndarray, sr: int, hz: float) -> np.ndarray:
+    """2-pole high-pass a mono signal through an ffmpeg pipe. Length-preserving.
+
+    Used on the room mic so it can be pushed loud for snare/cymbal/guitar energy
+    without its low-end rumble phase-cancelling the board's tight kick/bass.
+    """
+    raw = _ffmpeg_pipe(mono.astype(np.float32).tobytes(), sr, 1,
+                       f'highpass=f={hz:g}:poles=2', 1)
+    out = np.frombuffer(raw, dtype=np.float32).copy()
+    N = len(mono)
+    if len(out) < N:
+        out = np.pad(out, (0, N - len(out)))
+    return out[:N]
+
+
+def _crush_mono(mono: np.ndarray, sr: int) -> np.ndarray:
+    """Heavily downward-compress a mono signal (NY-parallel style). Length-preserving.
+
+    Fast attack/release + high ratio explodes the room tail/density; blended
+    subtly under the main mix it adds aggression without touching board transients.
+    """
+    raw = _ffmpeg_pipe(mono.astype(np.float32).tobytes(), sr, 1,
+                       'acompressor=threshold=0.03:ratio=10:attack=1:release=40:makeup=4', 1)
+    out = np.frombuffer(raw, dtype=np.float32).copy()
+    N = len(mono)
+    if len(out) < N:
+        out = np.pad(out, (0, N - len(out)))
+    return out[:N]
+
+
+def _ms_scoop(left: np.ndarray, right: np.ndarray, sr: int,
+              freq: float, q: float, gain_db: float) -> tuple[np.ndarray, np.ndarray]:
+    """Mid/Side EQ: scoop the Mid channel in the vocal band, leave the Side untouched.
+
+    Carves a centre pocket so the dry board vocal punches through while the wide,
+    ambient room roar stays on the sides. Encodes L/R→M/S, equalises M, decodes back.
+    """
+    import tempfile as _tf, os as _os
+    N = len(left)
+    inter = np.empty(N * 2, dtype=np.float32)
+    inter[0::2] = left.astype(np.float32)
+    inter[1::2] = right.astype(np.float32)
+    fd_in, path_in = _tf.mkstemp(suffix='.f32le')
+    fd_out, path_out = _tf.mkstemp(suffix='.f32le')
+    try:
+        _os.write(fd_in, inter.tobytes()); _os.close(fd_in); _os.close(fd_out)
+        # M=(L+R)/2, S=(L-R)/2 → EQ M → L=M+S, R=M-S (unity round-trip)
+        graph = (
+            '[0:a]asplit=2[a][b];'
+            '[a]pan=mono|c0=0.5*c0+0.5*c1[m];'
+            '[b]pan=mono|c0=0.5*c0-0.5*c1[s];'
+            f'[m]equalizer=f={freq:g}:t=q:w={q:g}:g={gain_db:g}[meq];'
+            '[meq][s]join=inputs=2:channel_layout=stereo[ms];'
+            '[ms]pan=stereo|c0=c0+c1|c1=c0-c1[out]'
+        )
+        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error',
+               '-f', 'f32le', '-ar', str(sr), '-ac', '2', '-i', path_in,
+               '-filter_complex', graph, '-map', '[out]',
+               '-f', 'f32le', '-ar', str(sr), '-ac', '2', '-y', path_out]
+        subprocess.run(cmd, check=True)
+        with open(path_out, 'rb') as f:
+            raw = f.read()
+    finally:
+        for p in (path_in, path_out):
+            try:
+                _os.unlink(p)
+            except OSError:
+                pass
+    out = np.frombuffer(raw, dtype=np.float32)
+    m = (min(len(out), N * 2) // 2) * 2
+    l, r = out[0:m:2].copy(), out[1:m:2].copy()
+    if len(l) < N:
+        l = np.pad(l, (0, N - len(l)))
+        r = np.pad(r, (0, N - len(r)))
+    return l[:N], r[:N]
 
 
 def detect_resonant_peaks(
@@ -956,14 +1047,30 @@ def _mix_channels(
     logger.info(f'MASTER  processing {len(available)} ch  ({N / sr / 60:.1f} min)',
                 extra={'tui': False})
     spread_delay = int(spread_ms / 1000.0 * sr) if room_spread else 0
+    parallel_room = np.zeros(N, dtype=np.float32) if ROOM_PARALLEL_CRUSH > 0 else None
     for ch in available:
         mono = raws[ch][:N]
         if len(mono) < N:
             mono = np.pad(mono, (0, N - len(mono)))
 
+        # v3: high-pass the room mic before anything else, so it can be pushed
+        # loud for energy without its low-end rumble fighting the board's kick/bass.
+        if ROOM_HPF_HZ > 0 and ch in ROOM_CHANNELS:
+            mono = _highpass_mono(mono, sr, ROOM_HPF_HZ)
+
+        # v3: tap the post-HPF, pre-OTT room for the parallel crush bus.
+        if parallel_room is not None and ch in ROOM_CHANNELS:
+            parallel_room += mono
+
         proc = (ch_processor_map.get(ch)
                 if ch_processor_map else None) or channel_processor
         processed = proc(mono)
+
+        # v5: pump the room up in the blend (board stays put). Post-OTT, pre-pan so it
+        # lifts the clean panned room contribution; the parallel crush bus keeps its own
+        # ROOM_PARALLEL_CRUSH blend independent below.
+        if ROOM_MIX_GAIN_DB and ch in ROOM_CHANNELS:
+            processed = (processed * 10.0 ** (ROOM_MIX_GAIN_DB / 20.0)).astype(np.float32)
 
         if room_spread and ch in ROOM_CHANNELS and spread_delay > 0:
             # Complementary comb pseudo-stereo: L = x + g·delay, R = x - g·delay.
@@ -978,6 +1085,21 @@ def _mix_channels(
             l_w, r_w = _pan_weights(pan_map.get(ch, 0.0))
             left += processed * l_w
             right += processed * r_w
+
+    # v3: blend the crushed parallel room bus equally under the mix (centre).
+    if parallel_room is not None:
+        crushed = _crush_mono(parallel_room, sr)
+        logger.info(f'PARALLEL room crush blend {ROOM_PARALLEL_CRUSH:.0%}', extra={'tui': False})
+        left += ROOM_PARALLEL_CRUSH * crushed * 0.707
+        right += ROOM_PARALLEL_CRUSH * crushed * 0.707
+
+    # v3: Mid/Side vocal-pocket scoop on the pre-master mix.
+    if BUS_MS_SCOOP_DB != 0:
+        logger.info(
+            f'MS SCOOP mid {BUS_MS_SCOOP_DB:+g}dB @ {BUS_MS_SCOOP_FREQ:g}Hz Q{BUS_MS_SCOOP_Q:g}',
+            extra={'tui': False})
+        left, right = _ms_scoop(left, right, sr, BUS_MS_SCOOP_FREQ,
+                                BUS_MS_SCOOP_Q, BUS_MS_SCOOP_DB)
 
     return left, right
 
@@ -1539,6 +1661,14 @@ if __name__ == '__main__':
                         help='Widen room ch (29/30) to pseudo-stereo via complementary comb (good for a single room mic)')
     parser.add_argument('--spread-ms', type=float, default=14.0, metavar='MS',
                         help='Comb delay in ms for --room-spread (default 14)')
+    parser.add_argument('--room-hpf', type=float, default=None, metavar='HZ',
+                        help='v3: high-pass room ch before processing (Hz), so it can be pushed loud cleanly')
+    parser.add_argument('--room-parallel-crush', type=float, default=None, metavar='FRAC',
+                        help='v3: blend a crushed parallel room bus at FRAC (0-1) for NY-style density')
+    parser.add_argument('--room-mix', type=float, default=None, metavar='DB',
+                        help=f'v5: room level in the final L/R blend (dB, post-OTT pre-pan); board unchanged (default {ROOM_MIX_GAIN_DB:+g})')
+    parser.add_argument('--bus-ms-scoop', type=float, default=None, metavar='DB',
+                        help='v3: Mid/Side scoop the final-mix Mid in the vocal band (dB<0) to pocket the board vocal')
     parser.add_argument('--dyers', action='store_true',
                         help='Post-OTT DyERS dynamic resonance suppression (the 35-focused preset)')
     parser.add_argument('--kill-feedback', action='store_true',
@@ -1575,6 +1705,8 @@ if __name__ == '__main__':
                        help=f'Master H gain (default {OTT_MASTER_GAIN_H_DB:+g})')
     gains.add_argument('--master-upwd', type=float, default=None, metavar='PCT',
                        help=f'Master upward compression strength 0–200 (OTT default 100, script default {OTT_MASTER_UPWD_STRGTH:g})')
+    gains.add_argument('--room-upwd', type=float, default=None, metavar='PCT',
+                       help=f'v4: room ch upward compression strength 0–200, lifts low-level crowd/cheers (script default {OTT_ROOM_UPWD_STRGTH:g})')
     gains.add_argument('--in-gain', type=float, default=None, metavar='DB',
                        help=f'Master input gain dB (OTT default 0, script default {OTT_MASTER_IN_GAIN_DB:+g})')
     gains.add_argument('--out-gain', type=float, default=None, metavar='DB',
@@ -1617,6 +1749,8 @@ if __name__ == '__main__':
         OTT_MASTER_GAIN_H_DB = args.master_h
     if args.master_upwd is not None:
         OTT_MASTER_UPWD_STRGTH = args.master_upwd
+    if args.room_upwd is not None:
+        OTT_ROOM_UPWD_STRGTH = args.room_upwd
     if args.in_gain is not None:
         OTT_MASTER_IN_GAIN_DB = args.in_gain
     if args.out_gain is not None:
@@ -1629,6 +1763,14 @@ if __name__ == '__main__':
         OTT_BOARD_DEPTH = args.board_depth
     if args.master_depth is not None:
         OTT_MASTER_DEPTH = args.master_depth
+    if args.room_hpf is not None:
+        ROOM_HPF_HZ = args.room_hpf
+    if args.room_parallel_crush is not None:
+        ROOM_PARALLEL_CRUSH = args.room_parallel_crush
+    if args.room_mix is not None:
+        ROOM_MIX_GAIN_DB = args.room_mix
+    if args.bus_ms_scoop is not None:
+        BUS_MS_SCOOP_DB = args.bus_ms_scoop
     if args.feedback_band is not None:
         FEEDBACK_BAND = (args.feedback_band[0], args.feedback_band[1])
     if args.feedback_prominence is not None:
