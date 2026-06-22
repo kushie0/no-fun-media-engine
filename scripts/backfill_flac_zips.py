@@ -69,6 +69,76 @@ def _write_stored_zip(out_path: pathlib.Path,
             zf.writestr(arcname, data)
 
 
+def verify_flac_zip(zip_path: pathlib.Path) -> str:
+    """Post-conversion integrity check on a FLAC zip.
+
+    Returns 'OK Nch' if:
+      - all entries are .flac
+      - all entries are ZIP_STORED (not recompressed)
+      - the smallest entry decodes OK via ffmpeg (proves the archive is readable)
+    Returns a 'BAD ...' reason string on any failure.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            infos = z.infolist()
+            names = [i.filename for i in infos]
+            if not names or not all(n.lower().endswith('.flac') for n in names):
+                return f'BAD non-flac entries: {names[:3]}'
+            if any(i.compress_type != zipfile.ZIP_STORED for i in infos):
+                return 'BAD not all ZIP_STORED'
+            smallest = min(infos, key=lambda i: i.file_size)
+            with tempfile.TemporaryDirectory() as td:
+                out = pathlib.Path(td) / pathlib.Path(smallest.filename).name
+                out.write_bytes(z.read(smallest.filename))
+                if _decoded_md5(out) is None:
+                    return f'BAD {smallest.filename} would not decode'
+        return f'OK {len(names)}ch'
+    except Exception as e:
+        return f'BAD verify error: {e}'
+
+
+def verify_flac_zip_paranoid(flac_zip: pathlib.Path,
+                             wav_zip: pathlib.Path) -> str:
+    """Full per-channel integrity re-check before an irreversible WAV delete.
+
+    `verify_flac_zip` only decodes the smallest channel (fast, structural).
+    This decodes EVERY channel from both the staged FLAC zip and the original
+    WAV zip (still on disk at promote time) and compares their 24-bit PCM md5,
+    re-proving the FLAC is bit-faithful (top 24 bits) to the source channel by
+    channel. Returns 'OK Nch md5-verified' or 'BAD ...'.
+    """
+    base = verify_flac_zip(flac_zip)        # structural: all-flac, ZIP_STORED, readable
+    if not base.startswith('OK'):
+        return base
+    if not wav_zip.exists():
+        return 'BAD wav original gone — cannot paranoid-verify'
+    try:
+        with zipfile.ZipFile(flac_zip) as fz, zipfile.ZipFile(wav_zip) as wz:
+            wav_by_stem = {pathlib.Path(n).stem: n
+                           for n in wz.namelist() if n.lower().endswith('.wav')}
+            flac_names = [n for n in fz.namelist() if n.lower().endswith('.flac')]
+            matched = 0
+            with tempfile.TemporaryDirectory() as td:
+                tdp = pathlib.Path(td)
+                for fn in flac_names:
+                    wn = wav_by_stem.get(pathlib.Path(fn).stem)
+                    if wn is None:
+                        return f'BAD no WAV channel matching {fn}'
+                    fp = tdp / 'c.flac'; fp.write_bytes(fz.read(fn))
+                    wp = tdp / 'c.wav';  wp.write_bytes(wz.read(wn))
+                    fm, wm = _decoded_md5(fp), _decoded_md5(wp)
+                    if fm is None or wm is None:
+                        return f'BAD decode failed on {fn}'
+                    if fm != wm:
+                        return f'BAD md5 mismatch on {fn}'
+                    matched += 1
+            if matched != len(wav_by_stem):
+                return f'BAD channel count flac={matched} wav={len(wav_by_stem)}'
+        return f'OK {matched}ch md5-verified'
+    except Exception as e:
+        return f'BAD paranoid verify error: {e}'
+
+
 def _convert_one(zip_path: pathlib.Path, apply: bool,
                  staged: bool = False) -> tuple[bool, int, int]:
     """Convert one WAV-zip to FLAC. Returns (changed, old_bytes, new_bytes).

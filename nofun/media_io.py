@@ -13,6 +13,8 @@ __all__ = [
     'compute_ffmpeg_eta',
     'get_open_processes',
     'is_file_locked',
+    'is_cloud_only',
+    'rename_cloud_file',
     'dehydrate_cloud_files',
     'DeleteQueue',
 ]
@@ -624,6 +626,35 @@ def is_cloud_only(path: pathlib.Path) -> bool:
         return attrs != 0xFFFFFFFF and bool(attrs & _CLOUD_RECALL_ATTR)
     except Exception:
         return False
+
+
+def rename_cloud_file(src: pathlib.Path, dst: pathlib.Path,
+                      logger: logging.Logger | None = None) -> str:
+    """Rename a SharePoint/OneDrive file in place without touching hydration.
+
+    Renaming a Files-On-Demand placeholder forces OneDrive to materialize
+    (download) the full file first, so dehydrated placeholders are left
+    untouched — they expire on the cloud's own cadence and the new name arrives
+    via the normal sync. Only hydrated copies are renamed in place (a metadata
+    op, no bandwidth). Centralizes the guard that was inline in the sync flow so
+    RENAME and SHARE share one hydration-safe path.
+
+    Returns one of:
+      'renamed'         — src was hydrated and renamed to dst
+      'skip-exists'     — dst already present (nothing to do)
+      'skip-dehydrated' — src is a cloud-only placeholder; left as-is
+      'missing'         — src does not exist
+    """
+    if not src.exists():
+        return 'missing'
+    if dst.exists():
+        return 'skip-exists'
+    if is_cloud_only(src):
+        if logger:
+            logger.debug(f'CLOUD-RENAME: {src.name} is a placeholder — left to expire')
+        return 'skip-dehydrated'
+    src.rename(dst)
+    return 'renamed'
 
 
 def dehydrate_cloud_files(paths: list[pathlib.Path], logger: logging.Logger) -> None:

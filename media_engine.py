@@ -53,6 +53,7 @@ from nofun.media_io import (
     is_file_locked,
     probe_format,
     probe_total_frames,
+    rename_cloud_file,
     setup_logging,
 )
 from nofun.cleanup import (
@@ -71,6 +72,7 @@ from nofun.inventory import (
 from nofun.job_manifest import JobManifest
 from nofun.job_queue import JobCategory, JobQueue
 from nofun.state import MenuMode, PauseState
+from nofun.storage_config import StorageConfig
 from nofun.video import CAM_LABELS
 from nofun.multiplex import Layout, detect_layout, route_by_layout
 from nofun.backup_mirror import (
@@ -170,16 +172,22 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                           else self.mount_c / 'Users' / (os.environ.get('USERNAME') or os.environ.get('USER') or 'nofun') / 'VenueLighting')
         self.search_dir: pathlib.Path = directory if directory else default_source
 
-        # Destinations
+        # Destinations + the single storage-layout registry.
         # clips_dest is separate (C:\clips SSD) and never follows media_root —
         # set once here and left untouched by any runtime NAS→D: re-point.
         prefix = 'trial_runs' if trial_run else ''
-        if prefix:
-            self.clips_dest = self.mount_d / prefix / 'clips'
-            self._set_media_root(self.mount_d / prefix)
-        else:
-            self.clips_dest = detect_clips_root(self.mount_d)   # unchanged — C:\clips SSD
-            self._set_media_root(detect_media_root(self.mount_d))
+        self.clips_dest = (self.mount_d / prefix / 'clips') if prefix else detect_clips_root(self.mount_d)
+
+        # StorageConfig owns the layout (subdir names, SharePoint tenant path, the
+        # D: raw-backup tier) so every location lives in one registry — inventory
+        # and RENAME both derive their paths from it and can't silently miss a tier.
+        self.storage = StorageConfig.from_env(
+            self.mount_c, self.mount_d, self.search_dir, self.clips_dest)
+        self.sharepoint_dest: pathlib.Path | None = self.storage.sharepoint_dest
+        self.d_video_backup = self.storage.d_video_backup
+        self.d_audio_backup = self.storage.d_audio_backup
+
+        self._set_media_root((self.mount_d / prefix) if prefix else detect_media_root(self.mount_d))
 
         for d in (self.vids_dest, self.clips_dest, self.audio_dest,
                   self.video_archive, self.audio_archive):
@@ -192,15 +200,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._nas_miss = 0
         self._nas_hit  = 0
 
-        # SharePoint / OneDrive sync folder (copy-only; OneDrive syncs automatically)
-        _od = (self.mount_c / 'Users' / (os.environ.get('USERNAME') or os.environ.get('USER') or 'nofun')
-               / 'OneDrive - No Fun Troy LLC' / 'Multitracks')
-        self.sharepoint_dest: pathlib.Path | None = _od if _od.is_dir() else None
-
         # Logging — local rolling (48h) + remote rotating (800 KB)
         local_log      = self.script_dir / 'convert_recent.log'
         remote_log_dir = (self.mount_d / 'logs') if self.mount_d != pathlib.Path('.') else None
         self.logger    = setup_logging(local_log, remote_log_dir)
+        self.storage.validate(self.logger)
 
         # Console: brief summary; files: full detail
         version = app_version(self.script_dir)
@@ -422,6 +426,13 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             if p.is_dir():
                 paths.append(p)
         return paths or [pathlib.Path('./VenueLighting')]
+
+    def _all_storage_roots(self) -> list[pathlib.Path]:
+        """Every location that can hold band-named files, from the storage
+        registry against the *live* media_root — including the D: backup tier
+        the inventory view omits. Used by RENAME so a rename can't miss a tier.
+        """
+        return [p for p in self.storage.all_storage_roots(self.media_root) if p.is_dir()]
 
     def _run_inventory(self) -> None:
         from nofun.inventory import (
@@ -751,36 +762,27 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 self.logger.info(f"SHARE   {base} → {dest.name}")
                 for quad in quads:
                     cloud_dst = dest / cloud_filename(quad.name)
-                    if cloud_dst.exists():
+                    legacy    = dest / quad.name
+                    # Reuse a hydrated dated copy in place (no bandwidth); skip a
+                    # dehydrated placeholder (renaming would force a download) or
+                    # an already-present dest; copy from source only when neither.
+                    outcome = rename_cloud_file(legacy, cloud_dst, self.logger)
+                    if outcome in ('skip-exists', 'skip-dehydrated'):
                         continue
-                    legacy = dest / quad.name
-                    if legacy.exists() and is_cloud_only(legacy):
-                        # Renaming a Files-On-Demand placeholder forces OneDrive
-                        # to materialize (download) the full file first.  Leave
-                        # old dated copies alone — they expire on the cloud's
-                        # normal cadence; new ones land under the stripped name.
-                        continue
-                    if legacy.exists():
-                        # Migration / manual-rename case: existing dated copy in
-                        # cloud has same content; rename in place (no bandwidth)
-                        # instead of re-uploading from source.
-                        legacy.rename(cloud_dst)
-                    else:
+                    if outcome == 'missing':
                         shutil.copy(quad, cloud_dst)
                     newly_copied.append(cloud_dst)
             if zip_src and zip_src.exists() and not zip_done:
                 cloud_dst = dest / cloud_filename(zip_src.name)
-                legacy   = dest / zip_src.name
-                if not cloud_dst.exists():
-                    if legacy.exists() and is_cloud_only(legacy):
-                        pass  # dehydrated — skip rename to avoid forced download
-                    elif legacy.exists():
-                        legacy.rename(cloud_dst)
-                        newly_copied.append(cloud_dst)
-                    else:
-                        self.logger.info(f"SHARE   {base} ZIP → {dest.name}")
-                        shutil.copy(zip_src, cloud_dst)
-                        newly_copied.append(cloud_dst)
+                legacy    = dest / zip_src.name
+                outcome   = rename_cloud_file(legacy, cloud_dst, self.logger)
+                if outcome == 'renamed':
+                    newly_copied.append(cloud_dst)
+                elif outcome == 'missing':
+                    self.logger.info(f"SHARE   {base} ZIP → {dest.name}")
+                    shutil.copy(zip_src, cloud_dst)
+                    newly_copied.append(cloud_dst)
+                # skip-exists / skip-dehydrated: nothing to do
 
             try:
                 expire_date = rec_date + datetime.timedelta(days=EXPIRE_AGE)
@@ -3577,10 +3579,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         on the C: SSD and never follow the NAS.
         """
         self.media_root    = root
-        self.vids_dest     = root / 'videos'
-        self.audio_dest    = root / 'audio'
-        self.video_archive = root / 'video_archive'
-        self.audio_archive = root / 'audio_archive'
+        dests = self.storage.media_dests(root)
+        self.vids_dest     = dests['vids_dest']
+        self.audio_dest    = dests['audio_dest']
+        self.video_archive = dests['video_archive']
+        self.audio_archive = dests['audio_archive']
         for d in (self.vids_dest, self.audio_dest,
                   self.video_archive, self.audio_archive):
             d.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,6 @@ Methods are extracted verbatim from media_engine.py — no behaviour changes.
 
 from __future__ import annotations
 
-import datetime
 import pathlib
 
 from nofun.cleanup import canonical_sharepoint_name
@@ -27,6 +26,21 @@ _SHORT_LABEL: dict[str, str] = {
     'UNSHARED':                 'OK',
     'SHARED':                   '↑',
 }
+
+
+def _matches_band(name: str, prefix: str) -> bool:
+    """True if *name* begins with *prefix* and the band token ends there.
+
+    A filename carries the band token followed by a separator — the ``.N``
+    capture suffix ('.') or a ``_CAM``/``_MULTITRACK``/``_AUDIO`` part ('_') —
+    or nothing (the bare clips dir). Requiring that next char be '.'/'_' stops
+    a rename of band ``CRACKHEAD_BARBIE`` from also matching a distinct band
+    ``CRACKHEAD_BARBIEXTRA`` that shares the prefix.
+    """
+    if not name.startswith(prefix):
+        return False
+    rest = name[len(prefix):]
+    return rest == '' or rest[0] in '._'
 
 
 class InventoryMenuMixin:
@@ -367,121 +381,151 @@ class InventoryMenuMixin:
         if not date or not old or not new:
             self._cancel_rename()
             return
-        ps = next(
-            (v for (d, b), v in self._status_entries if d == date and b == old),
-            None,
-        )
+        from nofun.media_io import is_cloud_only
         rows: list[MenuRow] = [
             MenuRow(index=None, text=f"  [bold]{old}[/bold]  →  [bold green]{new}[/bold green]", dim=False),
             MenuRow(index=None, text='', dim=True),
         ]
-        if ps:
-            for f in sorted(ps.quad_files):
-                rows.append(MenuRow(index=None, text=f"  {f.name}  →  {f.name.replace(old, new)}"))
-            if ps.clip_files:
-                clip_dir = ps.clip_files[0].parent
-                new_dir  = clip_dir.name.replace(old, new)
+        # Local files — same globbed view the executor uses (filesystem is truth).
+        # The clips dir collapses to one line with its real child count.
+        for p in self._rename_top_level(date, old):
+            if p.is_dir():
+                n = sum(1 for c in p.iterdir() if old in c.name)
                 rows.append(MenuRow(
                     index=None,
-                    text=f"  {clip_dir.name}/  →  {new_dir}/  [dim]({len(ps.clip_files)} clips)[/dim]",
+                    text=f"  {p.name}/  →  {p.name.replace(old, new)}/  [dim]({n} clips)[/dim]",
                 ))
-            for f in sorted(ps.zip_files):
-                rows.append(MenuRow(index=None, text=f"  {f.name}  →  {f.name.replace(old, new)}"))
-            cloud_mp4s = [f for f in ps.cloud_files if f.suffix.lower() in ('.mp4', '.zip')]
-            if cloud_mp4s:
-                rows.append(MenuRow(index=None, text='', dim=True))
-                rows.append(MenuRow(index=None, text='  Cloud:', dim=True))
-                for f in sorted(cloud_mp4s):
-                    rows.append(MenuRow(
-                        index=None,
-                        text=f"  {f.name}  →  {f.name.replace(old, new)}  [dim](cloud)[/dim]",
-                    ))
+            else:
+                rows.append(MenuRow(index=None, text=f"  {p.name}  →  {p.name.replace(old, new)}"))
+        # Cloud — flag placeholders, which the hydration-safe rename will skip.
+        folder = self._find_date_folder(self.sharepoint_dest, date) if self.sharepoint_dest else None
+        cloud_files = sorted(f for f in folder.glob(f'{old}*') if _matches_band(f.name, old)) if folder else []
+        if cloud_files:
+            rows.append(MenuRow(index=None, text='', dim=True))
+            rows.append(MenuRow(index=None, text='  Cloud:', dim=True))
+            for f in cloud_files:
+                tag = 'cloud placeholder — left to expire' if is_cloud_only(f) else 'cloud'
+                rows.append(MenuRow(
+                    index=None,
+                    text=f"  {f.name}  →  {f.name.replace(old, new)}  [dim]({tag})[/dim]",
+                ))
         rows.append(MenuRow(index=None, text='', dim=True))
         bar = "Available commands:  [cyan]CONFIRM[/cyan] to proceed / [yellow]HOME[/yellow] to cancel"
         if self._app:
             self._app.update_menu('INVENTORY — RENAME', 'Confirm rename', rows, '', stats='')
             self._app.update_command_bar(bar)
 
+    def _rename_top_level(self, date_str: str, old_band: str) -> list[pathlib.Path]:
+        """Top-level ``<date>_<band>*`` matches across the engine's storage
+        locations (the clips dir appears as one entry, not its 145 files).
+
+        Locations come from ``_inventory_search_paths()`` — the single registry
+        of where the engine puts files — so a new storage tier is picked up here
+        automatically, never silently missed. SharePoint is excluded: its files
+        carry no date prefix and need a hydration-safe rename (handled by the
+        caller). Used by the confirm preview and as the basis for the executor.
+        """
+        prefix = f'{date_str}_{old_band}'
+        out: list[pathlib.Path] = []
+        # _all_storage_roots() is the full registry (incl. the D: backup tier);
+        # SharePoint is handled separately (cloud, no date prefix, hydration-safe).
+        for root in self._all_storage_roots():
+            if root == self.sharepoint_dest or not root.is_dir():
+                continue
+            out += sorted(p for p in root.glob(f'{prefix}*') if _matches_band(p.name, prefix))
+        return out
+
+    def _rename_targets(self, date_str: str, old_band: str) -> list[pathlib.Path]:
+        """Every local path a rename must touch, children before their parent
+        dir so a clip file is moved before the clips dir is renamed."""
+        targets: list[pathlib.Path] = []
+        for p in self._rename_top_level(date_str, old_band):
+            if p.is_dir():
+                targets += sorted(c for c in p.iterdir() if old_band in c.name)
+            targets.append(p)
+        return targets
+
     def _do_rename_performance(self, date_str: str, old_band: str, new_band: str) -> None:
-        """Rename all files for a band on disk, in SharePoint, and in the encoding DB."""
+        """Rename a band everywhere by globbing the engine's known storage
+        locations for the old-band token.
+
+        The filesystem is the source of truth — not the encoding DB, which keeps
+        a clips *summary* (not every file) and can hold stale source paths. Cloud
+        files use a hydration-safe rename (placeholders are left to expire rather
+        than force a download). The DB is updated as a derived final step.
+        """
+        from nofun.media_io import is_cloud_only, rename_cloud_file
 
         def subst(name: str) -> str:
             return name.replace(old_band, new_band)
 
-        ps = next(
-            (v for (d, b), v in self._status_entries if d == date_str and b == old_band),
-            None,
-        )
-        if not ps:
-            self.logger.warning(f"RENAME  no data found for {old_band} on {date_str}")
-            return
-
         errors = 0
 
-        def _mv(src: pathlib.Path, dst: pathlib.Path) -> bool:
+        def _mv(src: pathlib.Path, dst: pathlib.Path) -> None:
             nonlocal errors
-            if src == dst:
-                return True
-            if not src.exists():
-                self.logger.warning(f"RENAME  missing: {src.name}")
-                return False
+            if src == dst or not src.exists():
+                return
             try:
                 src.rename(dst)
-                return True
             except OSError as e:
                 self.logger.warning(f"RENAME  could not rename {src.name}: {e}")
                 errors += 1
-                return False
 
-        # Quadrant files
-        if ps.quad_files:
-            self.logger.info(f"RENAME  quadrants ({len(ps.quad_files)} files)…")
-        for f in ps.quad_files:
-            _mv(f, f.parent / subst(f.name))
+        # --- Local files: every known location, children before parent dir. ---
+        targets = self._rename_targets(date_str, old_band)
+        self.logger.info(f"RENAME  local files: {len(targets)}…")
+        for p in targets:
+            _mv(p, p.parent / subst(p.name))
 
-        # Clips: rename files inside dir first, then rename the dir itself
-        if ps.clip_files:
-            clip_dir     = ps.clip_files[0].parent
-            new_clip_dir = clip_dir.parent / subst(clip_dir.name)
-            self.logger.info(f"RENAME  clips ({len(ps.clip_files)} files)…")
-            for f in ps.clip_files:
-                _mv(f, clip_dir / subst(f.name))
-            _mv(clip_dir, new_clip_dir)
-
-        # Audio zip
-        if ps.zip_files:
-            self.logger.info("RENAME  audio zip…")
-        for f in ps.zip_files:
-            _mv(f, f.parent / subst(f.name))
-
-        # Cloud files (quadrants + zip in SharePoint folder)
-        cloud_files = [f for f in ps.cloud_files if f.suffix.lower() in ('.mp4', '.zip')]
-        if cloud_files:
-            self.logger.info(f"RENAME  cloud ({len(cloud_files)} files)…")
-        for f in cloud_files:
-            _mv(f, f.parent / subst(f.name))
-
-        # Rename the SharePoint folder to reflect the updated band name
+        # --- Cloud (SharePoint): hydration-safe; placeholders left to expire. ---
         if self.sharepoint_dest and self.sharepoint_dest.is_dir():
-            try:
-                y, mo, d = date_str.split('-')
-                date_prefix = datetime.date(int(y), int(mo), int(d)).strftime('%y-%m-%d')
-                folder = self._find_date_folder(self.sharepoint_dest, date_prefix)
-                if folder:
+            # date_str is already 'YY-MM-DD' — pass it straight through. (The old
+            # code round-tripped it through datetime.date(int('26'), …).strftime
+            # ('%y…'), which raises "year >= 1900" on Windows.)
+            folder = self._find_date_folder(self.sharepoint_dest, date_str)
+            if folder:
+                placeholders = 0
+                for f in sorted(folder.glob(f'{old_band}*')):
+                    if not _matches_band(f.name, old_band):
+                        continue
+                    dst = f.parent / subst(f.name)
+                    if dst.exists():
+                        # A new-name copy already exists (e.g. a sync re-uploaded
+                        # under the new name after a prior rename). Consolidate to
+                        # one file. Keep whichever copy is hydrated so we never
+                        # trigger a download: if the old copy is hydrated, make it
+                        # the survivor (drop the duplicate, rename old→new); if the
+                        # old copy is a placeholder, just drop the redundant stub.
+                        if is_cloud_only(f):
+                            f.unlink()
+                            self.logger.info(f"RENAME  cloud dedup: dropped placeholder {f.name} (kept {dst.name})")
+                        else:
+                            dst.unlink()
+                            f.rename(dst)
+                            self.logger.info(f"RENAME  cloud dedup: kept hydrated {f.name} → {dst.name}")
+                        continue
+                    if rename_cloud_file(f, dst, self.logger) == 'skip-dehydrated':
+                        placeholders += 1
+                if placeholders:
+                    self.logger.info(
+                        f"RENAME  {placeholders} cloud placeholder(s) left to expire "
+                        f"(renaming would force a download)"
+                    )
+                try:
                     all_bands = [
                         new_band if b == old_band else b
                         for (dt, b), _ in self._status_entries
                         if dt == date_str and b not in ('NOFUN', 'TBD', '')
                     ]
-                    target = canonical_sharepoint_name(date_prefix, all_bands)
+                    target = canonical_sharepoint_name(date_str, all_bands)
                     if target != folder.name:
                         folder.rename(folder.parent / target)
                         self.logger.info(f"RENAME  SharePoint folder → {target}")
-            except (ValueError, OSError) as e:
-                self.logger.warning(f"RENAME  could not rename SharePoint folder: {e}")
-                errors += 1
+                except OSError as e:
+                    self.logger.warning(f"RENAME  could not rename SharePoint folder: {e}")
+                    errors += 1
 
-        # Update encoding DB
+        # --- Encoding DB (derived view, updated last). ---
         self.logger.info("RENAME  updating database…")
         self._encoding_db.rename_band(date_str, old_band, new_band)
         self._encoding_db.save()

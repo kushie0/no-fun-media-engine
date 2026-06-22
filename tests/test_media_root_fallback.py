@@ -13,6 +13,16 @@ import time
 import media_engine
 from media_engine import Pipeline
 from nofun.paths import nas_reachable
+from nofun.storage_config import StorageConfig
+
+
+def _default_storage(mount_d):
+    """Default-layout StorageConfig (subdirs = videos/audio/...) for stubs."""
+    return StorageConfig(
+        mount_c=mount_d, mount_d=mount_d,
+        search_dir=mount_d / 'src', clips_dest=mount_d / 'clips',
+        sharepoint_dest=None,
+    )
 
 
 def _make_pipeline(mount_d, media_root):
@@ -21,15 +31,12 @@ def _make_pipeline(mount_d, media_root):
     p.trial_run = 0
     p.mount_d = mount_d
     p.clips_dest = mount_d / 'clips'
+    p.storage = _default_storage(mount_d)
     p.logger = logging.getLogger('test_media_root_fallback')
     p._nas_miss = 0
     p._nas_hit = 0
     # Start on the NAS (media_root != mount_d).
-    p.media_root = media_root
-    p.vids_dest = media_root / 'videos'
-    p.audio_dest = media_root / 'audio'
-    p.video_archive = media_root / 'video_archive'
-    p.audio_archive = media_root / 'audio_archive'
+    p._set_media_root(media_root)
     return p
 
 
@@ -40,6 +47,7 @@ def _make_pipeline(mount_d, media_root):
 def test_set_media_root_repoints_all_and_leaves_clips(tmp_path):
     p = Pipeline.__new__(Pipeline)
     p.clips_dest = tmp_path / 'clips'      # C:\clips — must NOT move
+    p.storage = _default_storage(tmp_path / 'D')
     new_root = tmp_path / 'N'
 
     p._set_media_root(new_root)

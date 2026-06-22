@@ -1068,7 +1068,9 @@ class TestSyncEligiblePerformances:
         for q in ('CAM1', 'CAM2', 'CAM3', 'CAM4'):
             (sp_folder / f'{base}_{q}.mp4').write_bytes(sentinel_bytes)
 
-        with patch('media_engine.is_cloud_only', return_value=True):
+        # The hydration guard now lives in nofun.media_io.rename_cloud_file, so
+        # patch is_cloud_only there (the call site the sync flow reaches).
+        with patch('nofun.media_io.is_cloud_only', return_value=True):
             fp._sync_eligible_performances()
 
         final_folder = next(

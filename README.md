@@ -30,12 +30,23 @@ Launches in TUI/watchdog mode. Watches `SEARCH_DIR` and processes recordings as 
 
 ## Environment variables
 
+All storage locations resolve through one `StorageConfig` (`nofun/storage_config.py`),
+built from these variables at startup; the resolved layout is logged once on boot
+(`Storage layout …`). Every default reproduces the paths below, so a standard box needs
+none of them — set only what differs on another machine.
+
 | Variable | Default | Notes |
 |---|---|---|
 | `SEARCH_DIR` | `C:\Users\<username>\VenueLighting` | Source directory to watch |
 | `MOUNT_D` | `D:/` | Output drive root |
 | `MOUNT_C` | `C:/` | Companion override (rarely needed) |
-| `CLIPS_ROOT` | `<MOUNT_D>/clips` | Clip output directory |
+| `CLIPS_ROOT` | `<MOUNT_D>/clips` | Clip output directory (C: SSD; never follows the NAS) |
+| `NAS_ROOT` | _(unset)_ | NAS media root; falls back to `MOUNT_D` when unreachable |
+| `SHAREPOINT_DEST` | `…\<user>\OneDrive - No Fun Troy LLC\Multitracks` | OneDrive sync folder (cloud disabled if absent) |
+| `VIDEOS_SUBDIR` | `videos` | Media subdir name under the media root |
+| `AUDIO_SUBDIR` | `audio` | Media subdir name under the media root |
+| `VIDEO_ARCHIVE_SUBDIR` | `video_archive` | Archive subdir name (also names the D: backup tier) |
+| `AUDIO_ARCHIVE_SUBDIR` | `audio_archive` | Archive subdir name |
 
 ## Output layout
 

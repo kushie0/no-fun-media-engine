@@ -227,3 +227,159 @@ class TestPromptRenameNofun:
 
         assert result == mov
         assert mov.exists()
+
+
+# ---------------------------------------------------------------------------
+# Band rename (_rename_targets / _do_rename_performance) — glob-based, the
+# filesystem is the source of truth across every storage location.
+# ---------------------------------------------------------------------------
+
+
+def _make_rename_pipeline(tmp_path: pathlib.Path):
+    """Pipeline stub backed by a real StorageConfig with distinct NAS vs D: roots."""
+    from media_engine import Pipeline
+    from nofun.storage_config import StorageConfig
+
+    obj = object.__new__(Pipeline)
+    obj.mount_c     = pathlib.Path('C:/')          # != '.' enables search_dir
+    obj.mount_d     = tmp_path / 'D'               # D: backup tier lives here
+    obj.logger      = MagicMock()
+    obj.search_dir  = tmp_path / 'VenueLighting'
+    obj.clips_dest  = tmp_path / 'clips'
+    obj.media_root  = tmp_path / 'NAS'             # NAS, distinct from mount_d
+    obj.storage = StorageConfig(
+        mount_c=obj.mount_c, mount_d=obj.mount_d,
+        search_dir=obj.search_dir, clips_dest=obj.clips_dest,
+        sharepoint_dest=None,                      # cloud branch skipped in these tests
+    )
+    d = obj.storage.media_dests(obj.media_root)
+    obj.vids_dest, obj.audio_dest = d['vids_dest'], d['audio_dest']
+    obj.video_archive, obj.audio_archive = d['video_archive'], d['audio_archive']
+    obj.sharepoint_dest = None
+    obj.d_video_backup  = obj.storage.d_video_backup
+    obj.d_audio_backup  = obj.storage.d_audio_backup
+    for dd in (obj.search_dir, obj.clips_dest, obj.vids_dest, obj.audio_dest,
+               obj.video_archive, obj.audio_archive, obj.d_video_backup, obj.d_audio_backup):
+        dd.mkdir(parents=True, exist_ok=True)
+    obj._encoding_db    = MagicMock()
+    obj._status_entries = []
+    return obj
+
+
+def _seed_band_files(pipe, date='26-06-19', band='CRACKHEAD_BARBIE'):
+    """Create a representative file in every location plus a clips subdir."""
+    base = f'{date}_{band}'
+    (pipe.video_archive / f'{base}.8.mov').write_bytes(b'mov')        # NAS video_archive
+    (pipe.vids_dest / f'{base}.8_CAM1.mp4').write_bytes(b'q1')
+    (pipe.vids_dest / f'{base}.8_CAM2.mp4').write_bytes(b'q2')
+    (pipe.vids_dest / f'{base}.8_INSTAGRAM.mp4').write_bytes(b'reel')
+    (pipe.audio_dest / f'{base}_MULTITRACK.zip').write_bytes(b'zip')
+    # D: raw-backup tier — the location the old registry missed
+    (pipe.d_video_backup / f'{base}.8.mov').write_bytes(b'dmov')
+    (pipe.d_audio_backup / f'{base}_MULTITRACK.zip').write_bytes(b'dzip')
+    clip_dir = pipe.clips_dest / f'{base}.8'
+    clip_dir.mkdir()
+    for i in range(3):
+        (clip_dir / f'{base}.8_CAM1_{i}.mp4').write_bytes(b'c')
+    return clip_dir
+
+
+class TestRenameTargets:
+    """Pipeline._rename_targets / _rename_top_level globbing."""
+
+    def test_collects_every_location_children_first(self, tmp_path):
+        pipe = _make_rename_pipeline(tmp_path)
+        clip_dir = _seed_band_files(pipe)
+        # decoy: a different band that shares the date must never be touched
+        (pipe.vids_dest / '26-06-19_OTHERBAND.8_CAM1.mp4').write_bytes(b'x')
+        # decoy: a band whose name has the target as a PREFIX must not match
+        (pipe.vids_dest / '26-06-19_CRACKHEAD_BARBIEXTRA.8_CAM1.mp4').write_bytes(b'x')
+
+        targets = pipe._rename_targets('26-06-19', 'CRACKHEAD_BARBIE')
+        names = {p.name for p in targets}
+
+        # NAS: mov + 3 videos + zip + clip dir + 3 clip files = 9; D: backup mov + zip = 11
+        assert len(targets) == 11
+        assert '26-06-19_CRACKHEAD_BARBIE.8.mov' in names
+        assert '26-06-19_CRACKHEAD_BARBIE.8_INSTAGRAM.mp4' in names
+        assert not any('OTHERBAND' in n for n in names)
+        assert not any('BARBIEXTRA' in n for n in names)  # prefix-overmatch guard
+        # the D: backup tier is covered (the gap the live test surfaced)
+        assert pipe.d_video_backup / '26-06-19_CRACKHEAD_BARBIE.8.mov' in targets
+        assert pipe.d_audio_backup / '26-06-19_CRACKHEAD_BARBIE_MULTITRACK.zip' in targets
+        # each clip child precedes its parent dir (so the dir rename is safe)
+        dir_idx = targets.index(clip_dir)
+        child_idxs = [i for i, p in enumerate(targets) if p.parent == clip_dir]
+        assert child_idxs and max(child_idxs) < dir_idx
+
+    def test_do_rename_renames_everything_locally(self, tmp_path):
+        pipe = _make_rename_pipeline(tmp_path)
+        _seed_band_files(pipe)
+        (pipe.vids_dest / '26-06-19_OTHERBAND.8_CAM1.mp4').write_bytes(b'x')
+
+        pipe._do_rename_performance('26-06-19', 'CRACKHEAD_BARBIE', 'CRACKHEAD_BARNIE')
+
+        # nothing with the old band name survives anywhere — including the D: tier
+        leftover = [p for root in (pipe.vids_dest, pipe.audio_dest, pipe.clips_dest,
+                                   pipe.video_archive, pipe.d_video_backup, pipe.d_audio_backup)
+                    for p in root.rglob('*CRACKHEAD_BARBIE*')]
+        assert leftover == []
+        # the renamed dir holds all 3 clips under the new name
+        new_dir = pipe.clips_dest / '26-06-19_CRACKHEAD_BARNIE.8'
+        assert new_dir.is_dir()
+        assert len(list(new_dir.glob('*CRACKHEAD_BARNIE*'))) == 3
+        # decoy untouched; DB update fired
+        assert (pipe.vids_dest / '26-06-19_OTHERBAND.8_CAM1.mp4').exists()
+        pipe._encoding_db.rename_band.assert_called_once_with(
+            '26-06-19', 'CRACKHEAD_BARBIE', 'CRACKHEAD_BARNIE')
+
+
+class TestMatchesBand:
+    """menu_inventory._matches_band — band-boundary guard against prefix overmatch."""
+
+    def test_separator_and_exact_match(self):
+        from nofun.menu_inventory import _matches_band
+        p = '26-06-19_CRACKHEAD_BARBIE'
+        assert _matches_band('26-06-19_CRACKHEAD_BARBIE.8.mov', p)        # '.' suffix
+        assert _matches_band('26-06-19_CRACKHEAD_BARBIE_MULTITRACK.zip', p)  # '_' part
+        assert _matches_band('26-06-19_CRACKHEAD_BARBIE', p)              # bare dir
+        assert not _matches_band('26-06-19_CRACKHEAD_BARBIEXTRA.8.mp4', p)  # overmatch
+        assert not _matches_band('26-06-19_OTHER.8.mp4', p)
+
+    def test_cloud_prefix_no_date(self):
+        from nofun.menu_inventory import _matches_band
+        assert _matches_band('CRACKHEAD_BARBIE_AUDIO.mp3', 'CRACKHEAD_BARBIE')
+        assert not _matches_band('CRACKHEAD_BARBIEXTRA_AUDIO.mp3', 'CRACKHEAD_BARBIE')
+
+
+class TestRenameCloudFile:
+    """media_io.rename_cloud_file — hydration-safe in-place rename."""
+
+    def test_renamed_when_hydrated(self, tmp_path):
+        from nofun.media_io import rename_cloud_file
+        src = tmp_path / 'CRACKHEAD_BARBIE_CAM1.mp4'
+        src.write_bytes(b'q')
+        dst = tmp_path / 'CRACKHEAD_BARNIE_CAM1.mp4'
+        assert rename_cloud_file(src, dst) == 'renamed'
+        assert dst.exists() and not src.exists()
+
+    def test_missing_source(self, tmp_path):
+        from nofun.media_io import rename_cloud_file
+        src = tmp_path / 'nope.mp4'
+        assert rename_cloud_file(src, tmp_path / 'x.mp4') == 'missing'
+
+    def test_skip_when_dest_exists(self, tmp_path):
+        from nofun.media_io import rename_cloud_file
+        src = tmp_path / 'a.mp4'; src.write_bytes(b'1')
+        dst = tmp_path / 'b.mp4'; dst.write_bytes(b'2')
+        assert rename_cloud_file(src, dst) == 'skip-exists'
+        assert src.exists()  # untouched
+
+    def test_skip_dehydrated_placeholder(self, tmp_path):
+        # A cloud-only placeholder must not be renamed (would force a download).
+        src = tmp_path / 'a.mp4'; src.write_bytes(b'1')
+        dst = tmp_path / 'b.mp4'
+        with patch('nofun.media_io.is_cloud_only', return_value=True):
+            from nofun.media_io import rename_cloud_file
+            assert rename_cloud_file(src, dst) == 'skip-dehydrated'
+        assert src.exists() and not dst.exists()
