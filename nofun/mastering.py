@@ -61,14 +61,20 @@ OTT_ROOM_DEPTH:  float | None = None
 OTT_BOARD_DEPTH: float | None = None
 
 # Feedback notch (Option C) — adaptive per-show resonance detection + notch. CLI-overridable.
-FEEDBACK_BAND: tuple[float, float] = (2000.0, 3000.0)
+# Floor lowered 800->350 Hz (2026-06-23): the live-room howl on the Porches set
+# extended into the low-mids; the static narrow-notch detector now scans down to
+# 350 Hz. Only narrow peaks clearing FEEDBACK_PROMINENCE_DB get notched, so the
+# wider scan won't carve broadband low-mid content.
+FEEDBACK_BAND: tuple[float, float] = (350.0, 2000.0)
 FEEDBACK_PROMINENCE_DB: float = 8.0
 FEEDBACK_MAX: int = 4
 FEEDBACK_Q: float = 14.0
 FEEDBACK_CUT_DB: float = -14.0
 
 # DyERS dynamic resonance suppressor (post-OTT). Defaults = the "35 focused" preset.
-DYERS_BAND: tuple[float, float] = (1500.0, 6000.0)
+# Floor lowered 1500->800 Hz (2026-06-23) to reach the low-mid room howl the old
+# floor missed; see FEEDBACK_BAND note above.
+DYERS_BAND: tuple[float, float] = (800.0, 6000.0)
 DYERS_SENSITIVITY: float = 0.6   # 0-1, higher = more peaks (lower prominence threshold)
 DYERS_SHARPNESS: float = 0.8     # 0-1, higher = narrower notch
 DYERS_SPEED: float = 0.5         # 0-1, higher = faster attack/release
@@ -103,11 +109,16 @@ OTT_ROOM_GAIN_H_DB:      float =  0.0    # neutral
 
 # Board channels (31=L, 32=R) — vocals, presence, transients live here (X32 mains).
 BOARD_CHANNELS:          list[int] = [31, 32]
-OTT_BOARD_UPWD_STRGTH:   float = 30.0    # gentle upward compression
+OTT_BOARD_UPWD_STRGTH:   float = 70.0    # upward comp (30->70, 2026-06-23): lifts low-level
+                                         # board content; bass-weighted by the +3 dB low gain
+                                         # below — the "OTT bass boost" without makeup gain
 OTT_BOARD_DNWD_STRGTH:   float =  80.0   # softer downward (preserve bass punch)
 OTT_BOARD_GAIN_L_DB:     float =  3.0    # bass weight
 OTT_BOARD_GAIN_M_DB:     float =  3.0    # vocal clarity / midrange bite
 OTT_BOARD_GAIN_H_DB:     float =  2.0    # presence / air
+# De-esser on the board (vocal) feed, applied post-OTT so it tames the sibilance the
+# +2 dB air boost adds. ffmpeg `deesser` intensity 0-1; 0.0 disables. 0.2 = moderate.
+DEESS_BOARD_INTENSITY:   float =  0.2
 
 # Room-energy routing (v3/v4) — re-adds live room/crowd cleanly without the comb
 # filtering of the old Haas spread. Applied in _mix_channels; CLI-overridable via
@@ -344,6 +355,22 @@ def _highpass_mono(mono: np.ndarray, sr: int, hz: float) -> np.ndarray:
     """
     raw = _ffmpeg_pipe(mono.astype(np.float32).tobytes(), sr, 1,
                        f'highpass=f={hz:g}:poles=2', 1)
+    out = np.frombuffer(raw, dtype=np.float32).copy()
+    N = len(mono)
+    if len(out) < N:
+        out = np.pad(out, (0, N - len(out)))
+    return out[:N]
+
+
+def _deess_mono(mono: np.ndarray, sr: int, intensity: float) -> np.ndarray:
+    """De-ess a mono signal via ffmpeg `deesser`. Length-preserving.
+
+    Dynamic sibilance ducking keyed to high-frequency energy — only attenuates
+    when an ess actually hits, so the vocal stays bright between sibilants.
+    intensity 0-1 (0 = bypass). Applied to the board/vocal feed post-OTT.
+    """
+    raw = _ffmpeg_pipe(mono.astype(np.float32).tobytes(), sr, 1,
+                       f'deesser=i={intensity:g}:m=0.5:f=0.5:s=o', 1)
     out = np.frombuffer(raw, dtype=np.float32).copy()
     N = len(mono)
     if len(out) < N:
@@ -755,7 +782,10 @@ def make_ott_board_processor(sr: int, logger: logging.Logger) -> Callable[[np.nd
         plugin.gain_h_db = OTT_BOARD_GAIN_H_DB
         stereo_in = np.stack([mono.astype(np.float32), mono.astype(np.float32)])
         out = board(stereo_in, sample_rate=sr)
-        return ((out[0] + out[1]) / 2).astype(np.float32)
+        mixed = ((out[0] + out[1]) / 2).astype(np.float32)
+        if DEESS_BOARD_INTENSITY > 0:
+            mixed = _deess_mono(mixed, sr, DEESS_BOARD_INTENSITY)
+        return mixed
     return process
 
 

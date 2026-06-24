@@ -1110,7 +1110,8 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                                                self.logger, selected_only=True,
                                                clip=clip_arg,
                                                script_runner=self._script_runner,
-                                               denoise_room=False, dyers=True)
+                                               denoise_room=False, dyers=True,
+                                               kill_feedback=True)
             except Exception as exc:
                 self.logger.error(f"REMASTER  {base}  mastering failed: {exc!r}", exc_info=exc)
                 self._remaster_status[perf] = 'mastering_error'
