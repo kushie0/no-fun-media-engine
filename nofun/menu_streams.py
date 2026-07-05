@@ -1,109 +1,71 @@
-"""TUI command routing for the STREAMS menu.
+"""TUI routing for the STREAMS menu — a read-only dashboard for the gtv clip-wall.
 
-This is a Pipeline mixin — it has no __init__ and assumes all instance state
-is initialised on Pipeline.
-
-Methods are extracted verbatim from media_engine.py — no behaviour changes.
+Pipeline mixin (no __init__; state lives on Pipeline). As of Phase 3 this shows the *external* gtv
+stack (scripts/streams/google_tv_run.ps1 → mediamtx :8656): per-feed liveness + reception + assigned
+stick, observed via nofun.gtv_status. The engine does NOT own those processes — they run as the
+GoogleTVStreams / GoogleTVHeal scheduled tasks — so this menu never starts/stops them; it just
+reflects their state (an engine restart can't blip the wall). Start/stop/config controls arrive in
+Phase 3 landing 2.
 """
-
 from __future__ import annotations
 
 from nofun.state import MenuMode
-from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
+from nofun.gtv_status import GTV_RTSP_PORT, get_local_ip, gtv_feeds_status
 
 
 class StreamsMenuMixin:
 
     _STREAMS_HELP: list[tuple[str, str, list[str]]] = [
-        ('START',   'Launch all ffmpeg MPEG-TS stream workers', [
-            f'Creates a StreamServer with {STREAM_COUNT} StreamWorker threads on ports',
-            f'{BASE_PORT}–{BASE_PORT + STREAM_COUNT - 1}. Each worker loops a shuffled batch of clips',
-            'from clips_dest via an ffconcat playlist piped to ffmpeg → MPEG-TS stdout.',
-            'Clients connect via HTTP GET /video; chunks are broadcast via per-client',
-            'queues (BROADCAST_MAXQ). Codec auto-detected (h264/hevc_mp4toannexb).',
+        ('REFRESH', 'Re-read the gtv feed status', [
+            'Re-samples live ffmpeg publishers (per-feed metadata tag), established RTSP readers on',
+            f'{GTV_RTSP_PORT}, and the heal log assignments. Read-only — the gtv wall runs as the',
+            'GoogleTVStreams scheduled task, not from inside the engine.',
         ]),
-        ('RESTART', 'Stop all workers and restart fresh', [
-            'Calls StreamServer.stop() (terminates ffmpeg, sends None poison-pill to',
-            'all client queues for clean disconnect), then creates a new StreamServer',
-            'and calls start(). Codec and clip list are re-detected from scratch.',
+        ('HOME', 'Exit the dashboard (streams keep running)', [
+            'Returns to HOME. The gtv wall is external to the engine, so it keeps running regardless',
+            'of this menu or an engine restart.',
         ]),
-        ('STOP',    'Stop all streams and exit the menu', [
-            'Stops all workers and HTTP servers, sets _stream_server = None.',
-            'Connected TouchDesigner clients receive a clean TCP close (poison-pill',
-            'flushes the queue, handler loop exits, socket closes normally).',
-        ]),
-        ('HOME',    'Exit the streams menu (streams keep running)', [
-            'Sets _active_menu = MenuMode.NONE, restores home command bar.',
-            'Workers and HTTP servers stay alive — streams continue serving clients.',
-            'Use STOP to actually shut down the stream server.',
-        ]),
-        ('HELP',    'Show this help (again for technical detail)', [
-            'First HELP: brief one-liner per command.',
-            'HELP again while overlay is open: toggle to technical detail.',
-            'HOME dismisses and returns to the stream status view.',
+        ('HELP', 'Show this help (again for detail)', [
+            'First HELP: brief one-liner per command. HELP again toggles technical detail.',
         ]),
     ]
 
     def _enter_streams_menu(self) -> None:
-        """Open the STREAMS menu without auto-starting the server."""
-        self._show_streams_menu()    # calls show_menu() — flag must be False here
+        """Open the STREAMS dashboard."""
+        self._show_streams_menu()
         self._active_menu = MenuMode.STREAMS
 
     def _show_streams_menu(self) -> None:
-        """Build a MenuRow list and push it to the menu overlay."""
+        """Render the gtv feed status as a MenuRow list."""
         from nofun.tui import MenuRow
 
-        if self._stream_server is None:
-            # Idle state — server not started yet
-            ip   = get_local_ip()
-            rows = [MenuRow(index=None, text='  Streams are not running.', dim=True)]
-            subtitle = f"{ip}  ·  stopped"
-            footer   = 'stopped'
-            bar      = f"[green]START[/green] to begin streaming  /  [green]HELP[/green]  /  [yellow]HOME[/yellow]"
-            if self._app:
-                if self._active_menu != MenuMode.STREAMS:
-                    self._app.show_menu('STREAMS', subtitle, rows, footer)
+        ip = get_local_ip()
+        feeds = gtv_feeds_status()
+
+        if not feeds:
+            rows = [MenuRow(index=None,
+                            text='  No gtv feeds live  (GoogleTVStreams task stopped?).', dim=True)]
+            subtitle = f'{ip}:{GTV_RTSP_PORT}  ·  no feeds live'
+            footer   = 'no feeds'
+        else:
+            n      = len(feeds)
+            n_recv = sum(1 for f in feeds if f['receiving'])
+            rows = [MenuRow(index=None,
+                            text=f"{'Feed':<6}  {'Recv':<4}  {'URL':<34}  Assigned stick", dim=True)]
+            for i, f in enumerate(feeds, start=1):
+                if f['receiving'] is None:
+                    dot = "[yellow]?[/yellow]"
+                elif f['receiving']:
+                    dot = "[green]●[/green]"
                 else:
-                    self._app.update_menu('STREAMS', subtitle, rows, footer)
-                self._app.update_command_bar(bar)
-                self._app.update_status(f"STREAMS  ·  {subtitle}")
-            return
+                    dot = "[red]○[/red]"
+                stick = f['stick'] if f['stick'] != '(unassigned)' else '[dim](unassigned)[/dim]'
+                rows.append(MenuRow(index=i,
+                                    text=f"{f['feed']:<6}  {dot:<4}  {f['url']:<34}  {stick}"))
+            subtitle = f'{ip}:{GTV_RTSP_PORT}  ·  {n_recv} of {n} receiving'
+            footer   = f'{n_recv}/{n} recv'
 
-        statuses = self._stream_server.status()
-        n        = len(statuses)
-        n_live   = sum(1 for s in statuses if s['live'])
-        ip       = get_local_ip()
-
-        BAR_W = 8
-
-        rows: list[MenuRow] = []
-        rows.append(MenuRow(
-            index=None,
-            text=f"{'Port':<6}  {'URL':<32}  {'Cl':>3}  {'Progress':<{BAR_W + 2}}  Current clip",
-            dim=True,
-        ))
-
-        for i, s in enumerate(statuses, start=1):
-            dot       = "[green]●[/green]" if s['live'] else "[red]○[/red]"
-            cl_str    = f"[dim]{s['clients']:>2}cl[/dim]"
-            remaining = s.get('time_remaining', 0.0)
-            duration  = s.get('clip_duration', 0.0)
-            if duration > 0:
-                frac   = max(0.0, min(1.0, 1.0 - remaining / duration))
-                filled = round(frac * BAR_W)
-                pbar   = f"[green]{'█' * filled}[/green][dim]{'░' * (BAR_W - filled)}[/dim]"
-            else:
-                pbar   = f"[dim]{'░' * BAR_W}[/dim]"
-            clip_nm   = s['clip'] if s['clip'] != '(none)' else '[dim](none)[/dim]'
-            rows.append(MenuRow(
-                index=i,
-                text=f"{s['port']:<6}  {s['url']:<32}  {cl_str}  {dot} {pbar}  {clip_nm}",
-            ))
-
-        subtitle = f"{ip}  ·  {n_live} of {n} live"
-        footer   = f"{n_live}/{n} live"
-        bar      = f"Available commands:  RESTART / STOP / [green]HELP[/green] / [yellow]HOME[/yellow]"
-
+        bar = 'Available commands:  REFRESH / [green]HELP[/green] / [yellow]HOME[/yellow]'
         if self._app:
             if self._active_menu != MenuMode.STREAMS:
                 self._app.show_menu('STREAMS', subtitle, rows, footer)
@@ -138,7 +100,7 @@ class StreamsMenuMixin:
             state.verbose = not state.verbose
 
     def _handle_stream_command(self, cmd: str) -> None:
-        """Route commands while the STREAMS menu is active."""
+        """Route commands while the STREAMS dashboard is active (read-only)."""
 
         def _exit_menu() -> None:
             self._active_menu = MenuMode.NONE
@@ -152,36 +114,13 @@ class StreamsMenuMixin:
                 self._show_streams_menu()
                 return
             _exit_menu()
-            if self._stream_server and self._stream_server.running:
-                self.logger.info("Streams menu closed. Streams continue running.")
             return
 
         if cmd == 'HELP':
             self._show_streams_help()
             return
 
-        if cmd == 'START':
-            if self._stream_server and self._stream_server.running:
-                self.logger.info("NOTICE  Streams are already running. Use RESTART to restart.")
-                return
-            self._stream_server = StreamServer(self.clips_dest, BASE_PORT, STREAM_COUNT)
-            self._stream_server.start()
-            self._show_streams_menu()
-            return
-
-        if cmd == 'STOP':
-            if self._stream_server:
-                self._stream_server.stop()
-                self._stream_server = None
-            _exit_menu()
-            self.logger.info("Streams stopped.")
-            return
-
-        if cmd == 'RESTART':
-            if self._stream_server:
-                self._stream_server.stop()
-            self._stream_server = StreamServer(self.clips_dest, BASE_PORT, STREAM_COUNT)
-            self._stream_server.start()
+        if cmd in ('REFRESH', ''):
             self._show_streams_menu()
             return
 

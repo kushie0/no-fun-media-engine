@@ -116,7 +116,6 @@ class FakePipeline(Pipeline):
         self._reencode_parked:        set  = set()
         self._last_scheduled_enqueued: dict = {}
         self._last_scan_enqueued:      float = 0.0
-        self._stream_server            = None
 
         self._script_runner = MagicMock()
         self._script_runner.run.return_value = ScriptResult(

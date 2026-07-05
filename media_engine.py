@@ -78,7 +78,6 @@ from nofun.multiplex import Layout, detect_layout, route_by_layout
 from nofun.backup_mirror import (
     mirror_files, find_expired, DELIVERABLE_EXTS, RAW_BACKUP_EXTS,
 )
-from nofun.streams import BASE_PORT, STREAM_COUNT, StreamServer, get_local_ip
 
 # ---------------------------------------------------------------------------
 # Single-instance lock
@@ -257,8 +256,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
         # First NOPROBLEM bypasses the time gate; second also enables force re-encode
         self._noproblem_active: bool = False
-        # Stream server (None = not started)
-        self._stream_server: StreamServer | None = None
 
         # TUI app reference — set by run_with_queue(); None in batch mode
         self._app = None
@@ -329,6 +326,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         self._layout_cache: dict[str, tuple] = {}
         # Perfs where the DB audio_all_silent flag has already been logged this session
         self._audio_silent_notified: set[str] = set()
+        # Fallback quarantine for corrupt/truncated sources (fail ffprobe) when they
+        # can't be moved to corrupt/ (dev/trial, or a failed move). Path|size|mtime
+        # signatures so a replaced/repaired file drops out and retries. Hidden from
+        # the pipeline by _drop_quarantined() so the watchdog stops re-enqueuing a
+        # doomed encode every loop. Normal path physically moves the file instead.
+        self._corrupt_movs: set[str] = set()
         # Per-perf REMASTER outcome; read by _do_reel_for_perf to compose upstream-cause warning.
         # Keys: '{YY-MM-DD}_{band}' (perf-key form). Values: 'ok'|'no_zip'|'zip_empty'|'mastering_error'.
         # GIL makes single-key dict set/get atomic; REMASTER writes once before REEL reads.
@@ -1441,16 +1444,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
     # Command handling
     # -----------------------------------------------------------------------
 
-    def _toggle_streams(self) -> None:
-        """Start or stop ffmpeg HTTP streams (toggle)."""
-        if self._stream_server and self._stream_server.running:
-            self._stream_server.stop()
-            self._stream_server = None
-            self.logger.info("Streams stopped")
-        else:
-            self._stream_server = StreamServer(self.clips_dest, BASE_PORT, STREAM_COUNT)
-            self._stream_server.start()
-
     def _run_scan(self, scope: str = 'SCAN') -> None:
         """Probe files and write results to the encoding DB.
 
@@ -2248,8 +2241,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
 
     def _on_job_complete(self, lane: str) -> None:
         """Post-job housekeeping called by a worker after each dispatch."""
-        if self._stream_server:
-            self._stream_server.refresh_clips()
         if self._active_menu == MenuMode.JOBS:
             self._show_jobs_list()
         elif self._active_menu == MenuMode.STATUS:
@@ -2285,11 +2276,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         staging_root = pathlib.Path(__file__).parent / '_reprocess_staging'
         if staging_root.exists():
             shutil.rmtree(staging_root, ignore_errors=True)
-        # Stop streams cleanly so downstream clients (TouchDesigner) get a clean
-        # disconnect rather than a broken pipe / stalled connection.
-        if self._stream_server and self._stream_server.running:
-            self._stream_server.stop()
-            self._stream_server = None
 
     # -----------------------------------------------------------------------
     # File-event detection
@@ -2533,8 +2519,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         if (not self._job_queue.is_within_schedule(JobCategory.MANUAL)
                 and self._job_queue.pending_count(JobCategory.MANUAL)):
             parts.append("[yellow]jobs queued · runs at midnight[/yellow]")
-        if self._stream_server and self._stream_server.running:
-            parts.append("[green]streams live[/green]")
         sep = "  [dim]·[/dim]  "
         return f"[dim]\\[{ts}][/dim]  {sep.join(parts)}"
 
@@ -2695,6 +2679,22 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         if parts:
             self.logger.info(f"ARCHIVE AUDIO  {', '.join(parts)}")
 
+    def _mov_signature(self, mov: pathlib.Path) -> str:
+        """Identity for a source mov: path|size|mtime. Changes when the file is
+        replaced or repaired, so a quarantined-then-fixed recording retries on
+        its own without any manual clear."""
+        try:
+            st = mov.stat()
+            return f'{mov}|{st.st_size}|{int(st.st_mtime)}'
+        except OSError:
+            return str(mov)
+
+    def _drop_quarantined(self, movs: list[pathlib.Path]) -> list[pathlib.Path]:
+        """Filter out movs quarantined as corrupt this session (see _corrupt_movs)."""
+        if not self._corrupt_movs:
+            return movs
+        return [m for m in movs if self._mov_signature(m) not in self._corrupt_movs]
+
     def _process_perf_video(
         self,
         perf: str,
@@ -2704,10 +2704,55 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
         """Run the full video pipeline for one performance in a thread."""
         for mov in mov_list:
             ok = self._process_mov(mov, skip_clips=skip_clips)
-            if not ok:
+            if ok:
+                continue
+            # Tell an unusable source apart from a transient encode failure. A
+            # corrupt/truncated recording (e.g. 'moov atom not found') fails
+            # ffprobe, so it can never produce quads — get it out of the scan
+            # path so the watchdog stops re-enqueuing the same doomed encode
+            # every loop. A source that still probes fine failed for some other
+            # reason (GPU hiccup, stall-kill); leave it to retry as before.
+            if not probe_format(mov, 'duration'):
+                self._quarantine_corrupt_mov(mov)
+            else:
                 self.logger.warning(
                     f"ALERT   {mov.stem} — encode failed; job marked failed in queue"
                 )
+
+    def _quarantine_corrupt_mov(self, mov: pathlib.Path) -> None:
+        """Preserve a confirmed-unreadable source and take it out of the pipeline.
+
+        The raw bytes are kept for manual recovery — a corrupt source is never
+        deleted. Primary path: move it to mount_d/corrupt/ (off the C: scan
+        path, onto the roomy D: drive). Fallback, when no real D: is mounted
+        (dev/trial) or the move fails: record its signature in _corrupt_movs so
+        _drop_quarantined() hides it from every subsequent loop. Either way the
+        re-enqueue loop stops.
+        """
+        if self.mount_d != pathlib.Path('.'):
+            corrupt_dir = self.mount_d / 'corrupt'
+            corrupt_dir.mkdir(parents=True, exist_ok=True)
+            dest = corrupt_dir / mov.name
+            if dest.exists():  # don't clobber a prior quarantine of the same name
+                dest = corrupt_dir / f'{mov.stem}_{int(mov.stat().st_mtime)}{mov.suffix}'
+            try:
+                shutil.move(str(mov), str(dest))
+                self.logger.error(
+                    f"CORRUPT {mov.name} — unreadable source (no moov/index); "
+                    f"moved to corrupt/ for recovery",
+                    extra={'src': str(mov), 'dst': str(dest)},
+                )
+                return
+            except Exception as exc:
+                self.logger.warning(f"CORRUPT could not move {mov.name}: {exc}")
+
+        sig = self._mov_signature(mov)
+        if sig not in self._corrupt_movs:
+            self._corrupt_movs.add(sig)
+            self.logger.error(
+                f"CORRUPT {mov.name} — unreadable source (no moov/index); "
+                f"quarantined in place (move unavailable)"
+            )
 
     # -----------------------------------------------------------------------
     # Job manifest builder
@@ -3448,7 +3493,7 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     ch_files = perf_ch.get(perf, []) if not self.skip_audio else []
                     sd_files = perf_sd.get(perf, []) if not self.skip_audio else []
                     au_files = perf_au.get(perf, []) if not self.skip_audio else []
-                    mov_list = perf_mov.get(perf, [])
+                    mov_list = self._drop_quarantined(perf_mov.get(perf, []))
                     _singles  = perf_singles.get(perf, [])
                     if not (ch_files or sd_files or au_files or mov_list or _singles):
                         continue
@@ -3511,29 +3556,11 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 else:
                     app.update_queue_health('')
 
-            # Surface what shows are being streamed (only when the in-built
-            # StreamServer is running; the external start-streams script is
-            # invisible to the engine and stays blank).
+            # The venue streamers are external to the engine (start-streams.ps1 for the LED wall,
+            # the gtv scheduled task for the sticks), so the engine can't enumerate what's streaming
+            # here — leave the streams text blank. gtv feed health lives in the STREAMS dashboard.
             if app:
-                if self._stream_server and self._stream_server.running:
-                    try:
-                        statuses = self._stream_server.status()
-                    except Exception:
-                        statuses = []
-                    seen: set[str] = set()
-                    bands: list[str] = []
-                    for st in statuses:
-                        clip_name = st.get('clip', '')
-                        if not clip_name or clip_name == '(none)':
-                            continue
-                        stem = clip_name.rsplit('.', 1)[0]
-                        _date, band = extract_date_band(stem)
-                        if band and band != 'TBD' and band not in seen:
-                            seen.add(band)
-                            bands.append(band)
-                    app.update_streams_text(' · '.join(bands))
-                else:
-                    app.update_streams_text('')
+                app.update_streams_text('')
 
             # Transition to paused state after a soft or hard stop.
             # SOFT_PENDING waits until workers finish their current job before
@@ -3768,7 +3795,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                     _singles  = perf_singles.get(perf, [])
                     # In batch mode, run the interactive rename prompt before processing
                     raw_movs = perf_mov.get(perf, [])
-                    mov_list = [self._prompt_rename_nofun(m) for m in raw_movs]
+                    mov_list = self._drop_quarantined(
+                        [self._prompt_rename_nofun(m) for m in raw_movs]
+                    )
 
                     if not (ch_files or sd_files or au_files or mov_list or _singles):
                         continue
