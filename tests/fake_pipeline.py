@@ -19,6 +19,7 @@ from nofun.job_queue import JobQueue
 from nofun.media_io import DeleteQueue
 from nofun.script_runner import ScriptResult, ScriptRunner
 from nofun.state import MenuMode, PauseState
+from nofun.storage_config import StorageConfig
 from media_engine import Pipeline, _HelpState, _HOME_COMMANDS
 
 
@@ -51,7 +52,16 @@ class FakePipeline(Pipeline):
         self.audio_archive   = tmp_path / 'audio_archive'
         self.sharepoint_dest = None
         self.script_dir      = tmp_path
+        self.mount_c         = tmp_path
         self.mount_d         = tmp_path
+        self.media_root      = tmp_path
+        self.storage         = StorageConfig(
+            mount_c=tmp_path,
+            mount_d=tmp_path,
+            search_dir=tmp_path,
+            clips_dest=self.clips_dest,
+            sharepoint_dest=None,
+        )
         self.inventory_csv     = tmp_path / 'file_inventory.csv'
         self.inventory_summary = tmp_path / 'inventory_summary.txt'
 
@@ -116,6 +126,8 @@ class FakePipeline(Pipeline):
         self._reencode_parked:        set  = set()
         self._last_scheduled_enqueued: dict = {}
         self._last_scan_enqueued:      float = 0.0
+        self._nas_miss                 = 0
+        self._nas_hit                  = 0
 
         self._script_runner = MagicMock()
         self._script_runner.run.return_value = ScriptResult(
@@ -149,4 +161,3 @@ class FakePipeline(Pipeline):
             self._current_ffmpeg_procs.pop(key, None)
         else:
             self._current_ffmpeg_procs[key] = proc
-

@@ -7,6 +7,7 @@ the leading date producing '-05-24' folders. These pin the contract + the fixes.
 """
 import datetime
 
+from tests.builders import SHORT_DATE
 from nofun.inventory import extract_date_band
 from nofun.cleanup import cloud_filename
 
@@ -37,8 +38,8 @@ def test_performance_state_age_days_is_sane():
     # INVENTORY and never "recent" in the 7-day report. Pins the 2000+ offset
     # on the property itself, not just the standalone arithmetic above.
     from nofun.inventory import PerformanceState
-    ps = PerformanceState(date='26-05-24', band='LASTIMA')
-    assert ps.recording_date == datetime.date(2026, 5, 24)
+    ps = PerformanceState(date=SHORT_DATE, band='LASTIMA')
+    assert ps.recording_date == datetime.date(2026, 1, 1)
     assert ps.age_days is not None and 0 <= ps.age_days < 365 * 5
 
 

@@ -178,6 +178,7 @@ class TestMain:
 # --deep: CRC + FLAC decode (needs ffmpeg)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 @pytest.mark.skipif(shutil.which('ffmpeg') is None, reason='ffmpeg not available')
 class TestDeep:
     def _real_flac_bytes(self, tmp_path) -> bytes:

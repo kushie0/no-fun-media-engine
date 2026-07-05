@@ -1,35 +1,17 @@
 """Unit tests for nofun/audio.py (AudioMixin)."""
 
-import io
 import pathlib
-import struct
-import wave
 import zipfile
 from unittest.mock import MagicMock, patch
 
 from nofun.audio import MIN_ACTIVE_SECONDS, AudioMixin
 from nofun.inventory import perf_output_name
 from nofun.script_runner import ScriptResult
+from tests.builders import real_wav_bytes
 from tests.fake_pipeline import FakePipeline
 
 
-def _real_wav_bytes(frames: int = 2400, rate: int = 48000) -> bytes:
-    """A valid little 16-bit mono WAV — ffmpeg/FLAC can actually encode it.
-
-    The zip path now FLAC-encodes each channel via ffmpeg, so fixtures that get
-    bundled must be real WAVs, not `b'\\x00'` placeholder bytes.
-    """
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(b''.join(struct.pack('<h', (i % 100) - 50)
-                                for i in range(frames)))
-    return buf.getvalue()
-
-
-_REAL_WAV = _real_wav_bytes()
+_REAL_WAV = real_wav_bytes()
 
 
 # ---------------------------------------------------------------------------

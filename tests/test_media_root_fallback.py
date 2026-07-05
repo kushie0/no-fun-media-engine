@@ -11,9 +11,9 @@ import threading
 import time
 
 import media_engine
-from media_engine import Pipeline
 from nofun.paths import nas_reachable
 from nofun.storage_config import StorageConfig
+from tests.fake_pipeline import FakePipeline
 
 
 def _default_storage(mount_d):
@@ -26,8 +26,8 @@ def _default_storage(mount_d):
 
 
 def _make_pipeline(mount_d, media_root):
-    """A bare Pipeline with just the attrs the fallback methods read/write."""
-    p = Pipeline.__new__(Pipeline)
+    """A FakePipeline with storage roots adjusted for fallback tests."""
+    p = FakePipeline(mount_d.parent)
     p.trial_run = 0
     p.mount_d = mount_d
     p.clips_dest = mount_d / 'clips'
@@ -45,7 +45,7 @@ def _make_pipeline(mount_d, media_root):
 # ---------------------------------------------------------------------------
 
 def test_set_media_root_repoints_all_and_leaves_clips(tmp_path):
-    p = Pipeline.__new__(Pipeline)
+    p = FakePipeline(tmp_path)
     p.clips_dest = tmp_path / 'clips'      # C:\clips — must NOT move
     p.storage = _default_storage(tmp_path / 'D')
     new_root = tmp_path / 'N'

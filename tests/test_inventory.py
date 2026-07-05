@@ -4,6 +4,7 @@ import pathlib
 
 import pytest
 
+from tests.builders import SHORT_DATE, perf_state
 from nofun.inventory import (
     PerformanceState,
     _clean_band,
@@ -399,7 +400,7 @@ class TestClassifyLocation:
 
 class TestPerformanceState:
     def _ps(self, **kwargs) -> PerformanceState:
-        return PerformanceState(date='2025-01-01', band='TestBand', **kwargs)
+        return perf_state(date='25-01-01', **kwargs)
 
     def test_state_detected_when_raw_movs_no_quads(self, tmp_path):
         f = tmp_path / 'foo.mov'; f.write_bytes(b'\x00')
@@ -417,7 +418,7 @@ class TestPerformanceState:
         for q in quads: q.write_bytes(b'\x00')
         zp   = tmp_path / 'foo.zip'; zp.write_bytes(b'\x00')
         ps = PerformanceState(
-            date='2024-01-01', band='Band',
+            date=SHORT_DATE, band='Band',
             mov_files=[mov], quad_files=quads, zip_files=[zp],
         )
         # age > 30, no cloud — should be COMPLETE
@@ -485,7 +486,7 @@ class TestPerformanceState:
         for q in quads: q.write_bytes(b'\x00')
         zp = tmp_path / 'foo.zip'; zp.write_bytes(b'\x00')
         ps = PerformanceState(
-            date='2024-01-01', band='Band',
+            date=SHORT_DATE, band='Band',
             quad_files=quads, zip_files=[zp],
         )
         assert ps.state == 'COMPLETE'
@@ -502,7 +503,7 @@ class TestPerformanceState:
     def test_state_audio_only_cloud_expired(self, tmp_path):
         """Audio-only show with old ZIP in cloud → SHARE_EXPIRED, not INCOMPLETE."""
         cloud_zip = tmp_path / 'foo.zip'; cloud_zip.write_bytes(b'\x00')
-        ps = PerformanceState(date='2025-01-01', band='Band', cloud_files=[cloud_zip])
+        ps = PerformanceState(date='25-01-01', band='Band', cloud_files=[cloud_zip])
         assert ps.state == 'SHARE_EXPIRED'
 
 

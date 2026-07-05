@@ -4,71 +4,27 @@ Covers the lossless round-trip through `_create_and_verify_zip` (the bundle now
 holds STORED `.flac` entries whose decoded PCM matches the source WAV) and the
 gated `scripts/backfill_flac_zips.py` convert/skip/verify-fail behaviour.
 
-These exercise real ffmpeg FLAC encoding, so they're skipped when ffmpeg is
-absent.
+These exercise real ffmpeg FLAC encoding, so they run only with --integration
+and are skipped when ffmpeg is absent.
 """
 
 from __future__ import annotations
 
-import io
-import math
 import pathlib
 import shutil
-import struct
 import wave
 import zipfile
 
 import pytest
 
-if shutil.which('ffmpeg') is None:
-    pytest.skip('ffmpeg not available', allow_module_level=True)
-
 from scripts.backfill_flac_zips import _convert_one, _decoded_md5
+from tests.builders import real_wav as _real_wav
+from tests.builders import real_wav32 as _real_wav32
 
-
-def _real_wav(path: pathlib.Path, *, frames: int = 48000, rate: int = 48000,
-              seed: int = 0) -> pathlib.Path:
-    """Write a valid 16-bit mono WAV holding a tone (FLAC-compressible, like real audio).
-
-    A pure-ish sine is what FLAC models well — the synthetic equivalent of real
-    instrument audio — so the bundle genuinely shrinks, as it does in prod.
-    """
-    freq = 220.0 + seed * 55.0
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(b''.join(
-            struct.pack('<h', int(12000 * math.sin(2 * math.pi * freq * i / rate)))
-            for i in range(frames)
-        ))
-    path.write_bytes(buf.getvalue())
-    return path
-
-
-def _real_wav32(path: pathlib.Path, *, frames: int = 48000, rate: int = 48000,
-                seed: int = 0) -> pathlib.Path:
-    """Write a 32-bit mono WAV whose low 8 bits are genuinely populated.
-
-    The recorder emits pcm_s32le. We deliberately set the low byte of every
-    sample so a 24-bit FLAC re-encode is provably lossy there — the fixture for
-    the accepted-24-bit-FLAC behaviour (see TestThirtyTwoBitTruncation).
-    """
-    freq = 220.0 + seed * 55.0
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as w:
-        w.setnchannels(1)
-        w.setsampwidth(4)
-        w.setframerate(rate)
-        w.writeframes(b''.join(
-            struct.pack('<i',
-                        (int(0.3 * 2**31 * math.sin(2 * math.pi * freq * i / rate))
-                         & ~0xFF) | (i & 0xFF))
-            for i in range(frames)
-        ))
-    path.write_bytes(buf.getvalue())
-    return path
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(shutil.which('ffmpeg') is None, reason='ffmpeg not available'),
+]
 
 
 def _make_wav_zip(zip_path: pathlib.Path, chans: list[pathlib.Path]) -> None:

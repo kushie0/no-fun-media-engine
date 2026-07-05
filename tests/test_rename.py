@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
+from tests.fake_pipeline import FakePipeline
+
 # ---------------------------------------------------------------------------
 # Minimal Pipeline stub — avoids heavy __init__ side-effects
 # ---------------------------------------------------------------------------
@@ -19,10 +21,7 @@ import pytest
 
 def _make_pipeline_stub(search_dir: pathlib.Path):
     """Return a Pipeline instance with just enough state for rename tests."""
-    from media_engine import Pipeline
-
-    # Bypass __init__ entirely — construct bare object
-    obj = object.__new__(Pipeline)
+    obj = FakePipeline(search_dir)
     obj.search_dir = search_dir
     obj.logger = MagicMock()
     obj.trial_run = 0
@@ -237,10 +236,9 @@ class TestPromptRenameNofun:
 
 def _make_rename_pipeline(tmp_path: pathlib.Path):
     """Pipeline stub backed by a real StorageConfig with distinct NAS vs D: roots."""
-    from media_engine import Pipeline
     from nofun.storage_config import StorageConfig
 
-    obj = object.__new__(Pipeline)
+    obj = FakePipeline(tmp_path)
     obj.mount_c     = pathlib.Path('C:/')          # != '.' enables search_dir
     obj.mount_d     = tmp_path / 'D'               # D: backup tier lives here
     obj.logger      = MagicMock()

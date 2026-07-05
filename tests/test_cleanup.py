@@ -961,11 +961,7 @@ class TestSyncEligiblePerformances:
     """
 
     def _make_pipeline(self, tmp_path: pathlib.Path):
-        from media_engine import Pipeline
         fp = _FakePipeline(tmp_path)
-        # Borrow the methods under test from the real Pipeline class
-        fp._sync_eligible_performances = Pipeline._sync_eligible_performances.__get__(fp)
-        fp._find_date_folder = Pipeline._find_date_folder
         # encoding_db.upsert/save are called for every uploaded file; mock both
         fp._encoding_db = MagicMock()
         fp._app = None
@@ -1156,10 +1152,8 @@ class TestArchiveAudioBatch:
     """_archive_audio_batch aggregates outcomes into one INFO line."""
 
     def _make_pipeline(self, tmp_path: pathlib.Path):
-        from media_engine import Pipeline
         fp = _FakePipeline(tmp_path)
         fp._pipeline_moved = None
-        fp._archive_audio_batch = Pipeline._archive_audio_batch.__get__(fp)
         return fp
 
     def test_summary_line_emitted_once_per_batch(self, tmp_path, caplog):

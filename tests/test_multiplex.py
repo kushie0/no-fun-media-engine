@@ -161,6 +161,7 @@ class TestRouteByLayout:
 # End-to-end with real ffmpeg (skipped if ffmpeg is unavailable)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 @pytest.mark.skipif(shutil.which('ffmpeg') is None, reason='ffmpeg not installed')
 class TestFfmpegIntegration:
     def _make(self, path: Path, filter_complex: str, inputs: list[str]) -> None:

@@ -10,17 +10,12 @@ depends=encode_ids).
 
 import pathlib
 
-from media_engine import Pipeline
+from tests.fake_pipeline import FakePipeline
 
 
 def _bare_pipeline(tmp_path, force=False):
-    p = Pipeline.__new__(Pipeline)
+    p = FakePipeline(tmp_path)
     p.force = force
-    p.vids_dest = tmp_path / 'videos'
-    p.clips_dest = tmp_path / 'clips'
-    p.audio_dest = tmp_path / 'audio'
-    for d in (p.vids_dest, p.clips_dest, p.audio_dest):
-        d.mkdir(parents=True, exist_ok=True)
     return p
 
 

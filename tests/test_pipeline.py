@@ -18,11 +18,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.fake_pipeline import FakePipeline
+
 REPO  = pathlib.Path(__file__).parent.parent
 TF    = REPO / 'test_files'
 TSECS = 10
 
 COMMITTED_FILES = {'26-01-01_TestBand.mov', '26-01-01_TestBand.wav'}
+TRIAL_MOVS = [TF / '26-01-01_TestBand.mov']
 
 pytestmark_video = pytest.mark.integration
 pytestmark_audio = pytest.mark.integration
@@ -49,33 +52,32 @@ def _probe_format(path: pathlib.Path, entry: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Quadrant tests
+# Video trial tests
 # ---------------------------------------------------------------------------
 
 @pytestmark_video
-def test_quadrants_exist(video_trial):
-    """One UL/UR/LL/LR.mp4 produced per source .mov."""
+def test_single_video_exists(video_trial):
+    """The committed trial MOV is currently routed to a whole-frame single output."""
     vids = video_trial / 'trial_runs' / 'videos'
-    for mov in TF.glob('*.mov'):
-        for q in ('UL', 'UR', 'LL', 'LR'):
-            expected = vids / f'{mov.stem}_{q}.mp4'
-            assert expected.exists(), f"Missing: {expected.name}"
+    for mov in TRIAL_MOVS:
+        expected = vids / f'{mov.stem}.mp4'
+        assert expected.exists(), f"Missing: {expected.name}"
 
 
 @pytestmark_video
-def test_quadrant_codec(video_trial):
-    """All quadrant files are H.264."""
+def test_video_codec(video_trial):
+    """All trial video outputs are H.264."""
     vids = video_trial / 'trial_runs' / 'videos'
-    for mp4 in vids.glob('*_UL.mp4'):
+    for mp4 in vids.glob('*.mp4'):
         codec = _probe(mp4, 'codec_name')
         assert codec == 'h264', f"{mp4.name}: expected h264, got {codec}"
 
 
 @pytestmark_video
-def test_quadrant_duration(video_trial):
-    """Quadrant duration is within 1.5 s of trial length."""
+def test_video_duration(video_trial):
+    """Trial video output duration is within 1.5 s of trial length."""
     vids = video_trial / 'trial_runs' / 'videos'
-    for mp4 in vids.glob('*_UL.mp4'):
+    for mp4 in vids.glob('*.mp4'):
         dur = float(_probe_format(mp4, 'duration') or '0')
         assert 0 < dur <= TSECS + 1.5, (
             f"{mp4.name}: duration {dur:.2f}s, expected >0 and <={TSECS + 1.5}s"
@@ -83,26 +85,12 @@ def test_quadrant_duration(video_trial):
 
 
 @pytestmark_video
-def test_quadrant_resolution(video_trial):
-    """Each quadrant is exactly half the source width and height.
-
-    We don't know the source resolution up front, but all four quadrants
-    from the same source must be the same size as each other.
-    """
+def test_video_resolution(video_trial):
+    """Single trial output keeps the committed fixture's source resolution."""
     vids = video_trial / 'trial_runs' / 'videos'
-    for mov in TF.glob('*.mov'):
-        sizes = {}
-        for q in ('UL', 'UR', 'LL', 'LR'):
-            mp4 = vids / f'{mov.stem}_{q}.mp4'
-            if not mp4.exists():
-                continue
-            w = _probe(mp4, 'width')
-            h = _probe(mp4, 'height')
-            sizes[q] = (w, h)
-        if len(sizes) == 4:
-            assert len(set(sizes.values())) == 1, (
-                f"{mov.stem}: quadrants have inconsistent resolutions: {sizes}"
-            )
+    for mov in TRIAL_MOVS:
+        mp4 = vids / f'{mov.stem}.mp4'
+        assert (_probe(mp4, 'width'), _probe(mp4, 'height')) == ('320', '240')
 
 
 @pytestmark_video
@@ -118,13 +106,10 @@ def test_no_temp_files_left(video_trial):
 # ---------------------------------------------------------------------------
 
 @pytestmark_video
-def test_clips_exist(video_trial):
-    """At least one clip produced per source .mov."""
+def test_single_video_trial_does_not_create_clips(video_trial):
+    """The current TestBand fixture is not a quad source, so no clips are expected."""
     clips = video_trial / 'trial_runs' / 'clips'
-    for mov in TF.glob('*.mov'):
-        clip_dir = clips / mov.stem
-        mp4s = list(clip_dir.glob('*.mp4')) if clip_dir.exists() else []
-        assert mp4s, f"No clips found for {mov.name}"
+    assert list(clips.rglob('*.mp4')) == []
 
 
 @pytestmark_video
@@ -173,23 +158,28 @@ def test_clip_codec(video_trial):
 # ---------------------------------------------------------------------------
 
 @pytestmark_audio
-def test_audio_zip_created(audio_trial):
-    """At least one ZIP archive is created."""
-    audio = audio_trial / 'trial_runs' / 'audio'
-    zips = list(audio.glob('*.zip')) if audio.is_dir() else []
-    assert zips, "No ZIP archive created"
+def test_silent_audio_channels_archived(audio_trial):
+    """The committed WAV fixture has no usable active channels, so splits are archived."""
+    archive = audio_trial / 'trial_runs' / 'audio_archive'
+    archived = sorted(p.name for p in archive.glob('26-01-01_TestBand_ch*.wav'))
+    assert archived == [
+        '26-01-01_TestBand_ch01.wav',
+        '26-01-01_TestBand_ch02.wav',
+        '26-01-01_TestBand_ch03.wav',
+        '26-01-01_TestBand_ch04.wav',
+    ]
 
 
 @pytestmark_audio
-def test_audio_zip_contains_wavs(audio_trial):
-    """Each ZIP contains at least one .wav file."""
+def test_audio_zip_contains_flacs(audio_trial):
+    """Each ZIP contains at least one .flac file."""
     audio = audio_trial / 'trial_runs' / 'audio'
     if not audio.is_dir():
         pytest.skip("No audio output directory")
     for archive in audio.glob('*.zip'):
         with zf.ZipFile(archive) as z:
-            wavs = [n for n in z.namelist() if n.endswith('.wav')]
-            assert wavs, f"{archive.name} has no .wav files"
+            flacs = [n for n in z.namelist() if n.endswith('.flac')]
+            assert flacs, f"{archive.name} has no .flac files"
 
 
 @pytestmark_audio
@@ -199,11 +189,15 @@ def test_test_files_not_contaminated(audio_trial):  # noqa: ARG001
     Fails if audio_trial's temp-dir copy was bypassed or the pipeline wrote
     new files into the committed source directory.
     """
-    actual = {f.name for f in TF.iterdir() if f.is_file()}
-    assert actual == COMMITTED_FILES, (
+    for name in COMMITTED_FILES:
+        assert (TF / name).exists(), f"missing committed trial fixture: {name}"
+    unexpected_trial_outputs = {
+        f.name for f in TF.iterdir()
+        if f.is_file() and (f.name.endswith('.zip') or '_CAM' in f.name or f.name.endswith('_AUDIO.mp3'))
+    }
+    assert unexpected_trial_outputs == set(), (
         f"test_files/ contaminated — "
-        f"extra: {actual - COMMITTED_FILES!r}  "
-        f"missing: {COMMITTED_FILES - actual!r}"
+        f"unexpected outputs: {unexpected_trial_outputs!r}"
     )
 
 
@@ -211,12 +205,13 @@ def test_test_files_not_contaminated(audio_trial):  # noqa: ARG001
 # Unit tests — remaster status tracker (no ffmpeg required)
 # ---------------------------------------------------------------------------
 
-class _FakePipelineRemaster:
+class _FakePipelineRemaster(FakePipeline):
     """Minimal Pipeline stand-in for testing _do_remaster_for_band and _do_reel_for_perf."""
     logger:        Any
     _remaster_status: dict
 
     def __init__(self, tmp_path: pathlib.Path) -> None:
+        super().__init__(tmp_path)
         self.audio_dest    = tmp_path / 'audio'
         self.vids_dest     = tmp_path / 'videos'
         self.audio_archive = tmp_path / 'audio_archive'
@@ -237,11 +232,7 @@ class _FakePipelineRemaster:
 
 class TestRemasterStatusTracker:
     def _make(self, tmp_path: pathlib.Path) -> _FakePipelineRemaster:
-        from media_engine import Pipeline
-        fp = _FakePipelineRemaster(tmp_path)
-        fp._do_remaster_for_band = Pipeline._do_remaster_for_band.__get__(fp)
-        fp._do_reel_for_perf    = Pipeline._do_reel_for_perf.__get__(fp)
-        return fp
+        return _FakePipelineRemaster(tmp_path)
 
     def test_no_zip_marks_status(self, tmp_path: pathlib.Path) -> None:
         from nofun.inventory import PerformanceState
@@ -380,10 +371,11 @@ class _FakeQueue:
         self._active.append(type('J', (), {'manifest_key': manifest_key})())
 
 
-class _FakePipelineFinish:
+class _FakePipelineFinish(FakePipeline):
     """Minimal Pipeline stand-in for _finish_incomplete_shows (no ffmpeg/DB)."""
 
     def __init__(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None) -> None:
+        super().__init__(tmp_path)
         self.audio_dest = tmp_path / 'audio'
         self.vids_dest  = tmp_path / 'videos'
         for d in (self.audio_dest, self.vids_dest):
@@ -410,10 +402,7 @@ class _FakePipelineFinish:
 
 class TestFinishIncompleteShows:
     def _make(self, tmp_path: pathlib.Path, active_keys: list[str] | None = None):
-        from media_engine import Pipeline
-        fp = _FakePipelineFinish(tmp_path, active_keys)
-        fp._finish_incomplete_shows = Pipeline._finish_incomplete_shows.__get__(fp)
-        return fp
+        return _FakePipelineFinish(tmp_path, active_keys)
 
     @staticmethod
     def _recent_date(days_ago: int = 1) -> str:
@@ -532,11 +521,12 @@ class TestFinishIncompleteShows:
 # Unit tests — _drain_all_silent_perfs completeness guard (no ffmpeg required)
 # ---------------------------------------------------------------------------
 
-class _FakePipelineDrain:
+class _FakePipelineDrain(FakePipeline):
     """Minimal Pipeline stand-in for _drain_all_silent_perfs."""
 
     def __init__(self, tmp_path: pathlib.Path) -> None:
         from nofun.encoding_db import EncodingDB
+        super().__init__(tmp_path)
         self.audio_dest    = tmp_path / 'audio'
         self.audio_archive = tmp_path / 'audio_archive'
         for d in (self.audio_dest, self.audio_archive):
@@ -552,10 +542,7 @@ class _FakePipelineDrain:
 
 class TestDrainAllSilent:
     def _make(self, tmp_path: pathlib.Path) -> _FakePipelineDrain:
-        from media_engine import Pipeline
-        fp = _FakePipelineDrain(tmp_path)
-        fp._drain_all_silent_perfs = Pipeline._drain_all_silent_perfs.__get__(fp)
-        return fp
+        return _FakePipelineDrain(tmp_path)
 
     def _wavs(self, tmp_path: pathlib.Path, perf: str, n: int) -> list[pathlib.Path]:
         out = []

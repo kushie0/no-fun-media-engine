@@ -10,19 +10,16 @@ import pytest
 REPO  = pathlib.Path(__file__).parent.parent
 TF    = REPO / 'test_files'
 TSECS = 10
+TRIAL_FILES = {'26-01-01_TestBand.mov', '26-01-01_TestBand.wav'}
 
 sys.path.insert(0, str(REPO))
 
 
 # ---------------------------------------------------------------------------
-# --quality / --integration flags
+# --integration flag
 # ---------------------------------------------------------------------------
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        '--quality', action='store_true', default=False,
-        help='Run encoding quality SSIM regression tests (slow; requires reference crops).',
-    )
     parser.addoption(
         '--integration', action='store_true', default=False,
         help='Run integration tests that invoke real ffmpeg (slow; ~60s).',
@@ -32,15 +29,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    skip_quality = pytest.mark.skip(
-        reason='Quality tests skipped by default — run with --quality'
-    )
     skip_integration = pytest.mark.skip(
         reason='Integration tests skipped by default — run with --integration'
     )
     for item in items:
-        if 'quality' in item.keywords and not config.getoption('--quality'):
-            item.add_marker(skip_quality)
         if 'integration' in item.keywords and not config.getoption('--integration'):
             item.add_marker(skip_integration)
 
@@ -104,9 +96,8 @@ def video_trial(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     """
     import shutil
     src = tmp_path_factory.mktemp('video_src')
-    for f in TF.iterdir():
-        if f.is_file():
-            shutil.copy(str(f), str(src / f.name))
+    for name in TRIAL_FILES:
+        shutil.copy(str(TF / name), str(src / name))
     out = tmp_path_factory.mktemp('v_trial')
     r = subprocess.run(
         [sys.executable, str(REPO / 'media_engine.py'),
@@ -127,9 +118,8 @@ def audio_trial(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     """
     import shutil
     src = tmp_path_factory.mktemp('audio_src')
-    for f in TF.iterdir():
-        if f.is_file():
-            shutil.copy(str(f), str(src / f.name))
+    for name in TRIAL_FILES:
+        shutil.copy(str(TF / name), str(src / name))
     out = tmp_path_factory.mktemp('a_trial')
     r = subprocess.run(
         [sys.executable, str(REPO / 'media_engine.py'),

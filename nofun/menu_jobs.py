@@ -253,6 +253,11 @@ class JobsMenuMixin:
             self._show_jobs_help()
             return
 
+        if cmd.startswith('SCHEDULE'):
+            parts = cmd.split(maxsplit=1)
+            self._handle_schedule_command(parts[1] if len(parts) == 2 else '')
+            return
+
         if cmd == 'CANCEL':
             idx = self._jobs_selected_idx
             if idx is None:
@@ -329,9 +334,11 @@ class JobsMenuMixin:
 
         if sub == 'OFF':
             self._job_queue.set_rule_enabled('encode_window', False)
+            self._job_queue.set_rule_enabled('gpu_window', False)
             self.logger.info("SCHEDULE  encode time-gate disabled until midnight or SCHEDULE ON")
         elif sub == 'ON':
             self._job_queue.set_rule_enabled('encode_window', True)
+            self._job_queue.set_rule_enabled('gpu_window', True)
             self.logger.info("SCHEDULE  encode time-gate re-enabled")
 
         rules = self._job_queue.get_schedule_rules()

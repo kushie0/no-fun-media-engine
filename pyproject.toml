@@ -20,6 +20,5 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "quality: encoding quality SSIM regression tests (run with --quality flag)",
     "integration: integration tests that invoke real ffmpeg (run with --integration flag)",
 ]

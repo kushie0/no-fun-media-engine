@@ -6,6 +6,7 @@ without running ffmpeg or touching the D: drive.
 
 import datetime
 import pathlib
+import re
 import time as _time
 import unittest.mock
 from unittest.mock import MagicMock
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nofun.state import MenuMode, PauseState
+from nofun.job_queue import DEFAULT_SCHEDULE, JobCategory
 from tests.fake_pipeline import FakePipeline as _FakePipeline
 
 
@@ -65,6 +67,48 @@ class TestDeleteQueueAutoExecute:
         # Neither of these is a valid command
         fp._handle_command('YESPLEASE', False)
         fp._handle_command('CLOUDCLEAN', False)
+
+
+# ---------------------------------------------------------------------------
+# TestCommandIntegrity
+# ---------------------------------------------------------------------------
+
+class TestCommandIntegrity:
+    def test_home_command_bar_commands_are_routed(self, tmp_path: pathlib.Path) -> None:
+        from media_engine import _HOME_COMMANDS
+
+        command_bar = re.sub(r'\[[^]]+\]', '', _HOME_COMMANDS)
+        command_bar = command_bar.removeprefix('Available commands:').strip()
+        commands = [
+            c for c in re.split(r'\s*/\s*', command_bar) if c
+        ]
+
+        routed_scans = []
+        help_count = 0
+        notices = []
+        for command in commands:
+            fp = _FakePipeline(tmp_path / command.lower())
+            fp._app = MagicMock()
+            with (
+                unittest.mock.patch.object(fp, '_run_scan_async') as scan,
+                unittest.mock.patch.object(fp, '_show_help') as show_help,
+            ):
+                fp._handle_command(command, False)
+            routed_scans.extend(call.args[0] for call in scan.call_args_list)
+            help_count += show_help.call_count
+            notices.extend(
+                call.args[0] for call in fp.logger.info.call_args_list
+                if call.args and 'Unknown command' in call.args[0]
+            )
+
+        assert set(routed_scans) == {'SCAN'}
+        assert help_count == 1
+        assert notices == []
+
+    def test_schedule_rule_names_cover_menu_toggles(self) -> None:
+        names = {rule.name for rule in DEFAULT_SCHEDULE}
+        assert {'encode_window', 'gpu_window'} <= names
+        assert names == {'encode_window', 'gpu_window', 'cpu_window', 'manual_window', 'sync_always'}
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +398,20 @@ class TestJobsMenu:
         # HOME inside the JOBS menu handler should close it
         fp._handle_command('HOME', False)
         assert fp._active_menu == MenuMode.NONE
+
+    def test_schedule_off_blocks_gpu_window_alias(self, tmp_path: pathlib.Path) -> None:
+        """SCHEDULE OFF must disable every GPU-bound schedule rule, not only legacy encode_window."""
+        fp = _FakePipeline(tmp_path)
+        fp._app = MagicMock()
+        fp._active_menu = MenuMode.JOBS
+
+        assert fp._job_queue.is_within_schedule(JobCategory.GPU_BOUND, hour=10)
+
+        fp._handle_command('SCHEDULE OFF', False)
+        assert not fp._job_queue.is_within_schedule(JobCategory.GPU_BOUND, hour=10)
+
+        fp._handle_command('SCHEDULE ON', False)
+        assert fp._job_queue.is_within_schedule(JobCategory.GPU_BOUND, hour=10)
 
 
 # ---------------------------------------------------------------------------
