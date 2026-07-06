@@ -25,6 +25,7 @@ def main() -> None:
     p.add_argument('--source',   required=True,            help='Input WAV path')
     p.add_argument('--dest',     required=True,            help='Output MP3 path')
     p.add_argument('--quality',  default='2',              help='LAME VBR quality -q:a (default 2 ≈ 190 kbps)')
+    p.add_argument('--lufs',     default=None,             help='EBU R128 integrated-loudness target (e.g. -12); adds loudnorm before encode. Off = leave level untouched.')
     p.add_argument('--dry-run',  action='store_true',      help='Print command without executing')
     args = p.parse_args()
 
@@ -35,10 +36,15 @@ def main() -> None:
         print(json.dumps({'status': 'error', 'reason': 'source WAV missing', 'path': str(source)}))
         sys.exit(2)
 
+    # EBU R128 loudness normalisation (set-and-forget) — gain + gentle true-peak limiting to
+    # hit a target integrated LUFS, so the master (and the reel that muxes it) play at a
+    # consistent, social-standard loudness without the noise-floor lift that slamming OTT caused.
+    af = ['-af', f'loudnorm=I={args.lufs}:TP=-1.5:LRA=11'] if args.lufs else []
     cmd = [
         'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
         '-progress', 'pipe:2', '-nostats',
         '-i', str(source),
+        *af,
         '-c:a', 'libmp3lame', '-q:a', args.quality,
         str(dest),
     ]

@@ -390,6 +390,15 @@ def _safe_size(f: pathlib.Path) -> int:
         return 0
 
 
+_CHAN_NUM_RE = re.compile(r'ch(?:an)?(\d+)', re.IGNORECASE)
+
+
+def _chan_num(name: str) -> 'int | None':
+    """Extract the channel number from a channel WAV/FLAC name (chNN or chanNN)."""
+    m = _CHAN_NUM_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
 # ---------------------------------------------------------------------------
 # Free function
 # ---------------------------------------------------------------------------
@@ -792,6 +801,13 @@ class CleanupMixin:
                     f"EXPIRE  skipped raw WAVs for {date_str} {band} — ZIP probe failed"
                 )
                 continue
+            if not self._zip_channel_complete(perf_key(date_str, band), wavs):
+                self.logger.warning(
+                    f"EXPIRE  keeping raw WAVs for {date_str} {band} — ZIP is "
+                    f"missing an active board channel (looks truncated); the "
+                    f"archive is the only complete copy, so it is preserved"
+                )
+                continue
             total = sum(_safe_size(f) for f in wavs)
             findings.append(AuditFinding(
                 kind=FindingKind.RAW_AUDIO_EXPIRED,
@@ -832,6 +848,46 @@ class CleanupMixin:
                 return len(zf.namelist()) > 0
         except (zipfile.BadZipFile, OSError):
             return False
+
+    # House-mix channels: present and carrying signal in every complete
+    # recording, and the last the recorder finalises — so the channel-set race
+    # (see media_engine._channel_set_settled) drops these first.
+    _BOARD_CHANNELS = (30, 31, 32)
+
+    def _zip_channel_complete(self, perf_key: str, archive_wavs: list) -> bool:
+        """False when the ZIP looks truncated, so expiry must keep the archive.
+
+        A complete ZIP holds the board channels; a truncated one (zipped mid
+        channel-finalisation, then the sources deleted) is missing them. This is
+        the guard that would have kept the 2026-05 shows recoverable: without it,
+        a valid-but-partial ZIP satisfies _zip_verified and the only complete
+        copy (the archive) gets expired, making the truncation permanent.
+
+        Cheap: silence-probes only the board channels that are in the archive but
+        absent from the ZIP — none, for a complete ZIP, so the common path costs
+        nothing. A board channel that is genuinely silent (an unused input that
+        night) does not count as truncation.
+        """
+        zip_path = self.audio_dest / perf_output_name(perf_key, 'multitrack')
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zip_chans = {_chan_num(n) for n in zf.namelist()}
+        except (zipfile.BadZipFile, OSError):
+            return False  # unreadable ZIP → treat as incomplete, keep the archive
+        zip_chans.discard(None)
+        by_chan = {_chan_num(w.name): w for w in archive_wavs}
+        active_secs = getattr(self, '_active_seconds', None)
+        from nofun.audio import MIN_ACTIVE_SECONDS
+        for c in self._BOARD_CHANNELS:
+            wav = by_chan.get(c)
+            if wav is None or c in zip_chans:
+                continue  # archive lacks it, or the ZIP already has it → fine
+            if active_secs is None:
+                return False  # cannot verify silence → keep the archive to be safe
+            secs = active_secs(wav)
+            if secs is None or secs >= MIN_ACTIVE_SECONDS:
+                return False  # an active board channel is missing → truncated
+        return True
 
     def _auto_expire_raw_files(self) -> None:
         """Delete raw .mov / .wav files in archive past RAW_EXPIRE_AGE once their

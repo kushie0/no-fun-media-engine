@@ -574,6 +574,56 @@ class TestZipVerified:
 
 
 # ---------------------------------------------------------------------------
+# TestZipChannelComplete — expiry must not delete the archive of a truncated ZIP
+# ---------------------------------------------------------------------------
+
+class TestZipChannelComplete:
+    BASE = '26-04-11_ALTAR'
+
+    def _archive(self, fp, chans):
+        wavs = []
+        for c in chans:
+            f = fp.audio_archive / f'{self.BASE}_chan{c}.0.wav'
+            f.write_bytes(b'\x00' * 16)
+            wavs.append(f)
+        return wavs
+
+    def _zip(self, fp, chans):
+        zip_path = fp.audio_dest / f'{self.BASE}_MULTITRACK.zip'
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for c in chans:
+                zf.writestr(f'{self.BASE}_chan{c}.0.flac', b'flac')
+
+    def test_complete_zip_needs_no_probe(self, tmp_path):
+        fp = _FakePipeline(tmp_path)
+        fp._active_seconds = MagicMock()
+        wavs = self._archive(fp, range(1, 33))            # archive has all 32
+        self._zip(fp, [1, 2, 5, 8, 30, 31, 32])           # ZIP has the board
+        assert fp._zip_channel_complete(self.BASE, wavs) is True
+        fp._active_seconds.assert_not_called()            # board present → no cost
+
+    def test_missing_active_board_channel_is_truncated(self, tmp_path):
+        fp = _FakePipeline(tmp_path)
+        fp._active_seconds = MagicMock(return_value=1200.0)  # ch30 has signal
+        wavs = self._archive(fp, range(1, 33))
+        self._zip(fp, [5, 8, 9, 31, 32])                     # ch30 dropped (Kitty-style)
+        assert fp._zip_channel_complete(self.BASE, wavs) is False
+
+    def test_missing_silent_board_channel_is_not_truncated(self, tmp_path):
+        fp = _FakePipeline(tmp_path)
+        fp._active_seconds = MagicMock(return_value=0.0)     # ch30 genuinely silent
+        wavs = self._archive(fp, range(1, 33))
+        self._zip(fp, [5, 8, 9, 31, 32])                     # ch30 absent but silent
+        assert fp._zip_channel_complete(self.BASE, wavs) is True
+
+    def test_unreadable_zip_keeps_archive(self, tmp_path):
+        fp = _FakePipeline(tmp_path)
+        (fp.audio_dest / f'{self.BASE}_MULTITRACK.zip').write_bytes(b'not a zip')
+        wavs = self._archive(fp, range(1, 33))
+        assert fp._zip_channel_complete(self.BASE, wavs) is False
+
+
+# ---------------------------------------------------------------------------
 # TestAutoExpireRawWithQualityGate
 # Note: _auto_expire_raw_files derives age from the filename date prefix, not
 # mtime. Base '26-04-06_ALTAR' parses to 2026-04-06, always > RAW_EXPIRE_AGE

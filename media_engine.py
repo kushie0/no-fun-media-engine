@@ -393,6 +393,56 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             return False
         return (now - stored[1]) >= self._STABLE_SECS
 
+    # The recorder finalises a performance's channel WAVs at staggered times.
+    # An audio pass that fires mid-finalisation would zip only the channels
+    # closed so far and then archive/delete the sources — permanently
+    # truncating the multitrack (the late channels survive only in
+    # audio_archive). This is how 2026-06-06 Kitty_Little shipped 3 of 11
+    # channels. Hold a performance's audio until no channel file has been
+    # written for _CHAN_SET_SETTLE_SECS, i.e. the recorder has finished dumping
+    # the whole set. Per-file writes are already gated by _is_file_stable; this
+    # gates the *set*.
+    _CHAN_SET_SETTLE_SECS = 300
+
+    def _channel_set_settled(self, files: 'list[pathlib.Path]') -> bool:
+        """True once a performance's channel-WAV set has stopped growing.
+
+        Uses the newest channel file's mtime: once that is older than
+        _CHAN_SET_SETTLE_SECS the recorder has stopped adding channels, so the
+        set is complete and safe to zip. Stateless by design — it depends only
+        on file mtimes, so it can never wedge on stale in-memory state.
+        """
+        if not files:
+            return False
+        try:
+            newest = max(f.stat().st_mtime for f in files)
+        except OSError:
+            return False
+        return (time.time() - newest) >= self._CHAN_SET_SETTLE_SECS
+
+    def _defer_unsettled_audio(
+        self,
+        perf_ch: dict, perf_sd: dict, perf_au: dict,
+    ) -> None:
+        """Drop still-settling performances from the audio dicts, in place.
+
+        Their channel files stay on disk and are re-collected next pass; only
+        once _channel_set_settled() passes does the performance's audio get
+        enqueued for zipping. Video is unaffected (it uses separate dicts).
+        """
+        for perf in set(list(perf_ch) + list(perf_sd) + list(perf_au)):
+            chan_files = (list(perf_ch.get(perf, []))
+                          + list(perf_sd.get(perf, []))
+                          + list(perf_au.get(perf, [])))
+            if chan_files and not self._channel_set_settled(chan_files):
+                perf_ch.pop(perf, None)
+                perf_sd.pop(perf, None)
+                perf_au.pop(perf, None)
+                self.logger.debug(
+                    f"AUDIO  {perf} channel set still settling "
+                    f"({len(chan_files)} ch) — deferring zip"
+                )
+
     def _get_recording_files(self) -> list[pathlib.Path]:
         """Return .mov and .wav files in search_dir held open by another process.
 
@@ -3416,8 +3466,12 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                 override_time = False
             if not override_time and not self._job_queue.is_within_schedule(JobCategory.GPU_BOUND):
                 can_process = False
-            # Suppress processing while any interactive menu or pause is active
-            if self._active_menu != MenuMode.NONE or self._pause_state == PauseState.PAUSED:
+            # Suppress processing only while explicitly PAUSED. Browsing a menu no
+            # longer holds new-recording processing — the menus are read-only
+            # (STATUS/JOBS/STREAMS) or queue-guarded (REPROCESS/REMASTER), and the menu
+            # still owns the *display* (see _in_menu below), so the list just updates
+            # live while you browse instead of freezing the pipeline.
+            if self._pause_state == PauseState.PAUSED:
                 can_process = False
 
             # Name why the build block is skipped while raw inputs wait, so a
@@ -3425,8 +3479,6 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
             if not can_process and (mov_files or wav_files):
                 if self._pause_state == PauseState.PAUSED:
                     _block = 'PAUSED'
-                elif self._active_menu != MenuMode.NONE:
-                    _block = f'menu open ({self._active_menu.name})'
                 else:
                     _block = 'outside GPU schedule window'
                 _reason = f'{_block}: {len(mov_files)} mov + {len(wav_files)} wav waiting'
@@ -3466,6 +3518,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                             perf_ch[self._perf_key(f)].append(f)
                     perf_sd = self._collect_chan_candidates(self.search_dir, exclude_split=True)
                     perf_au = self._collect_chan_candidates(self.search_dir / 'Audio')
+                    # Full-channel-set gate: don't zip a performance's audio until
+                    # its channel set has settled (guards the truncation race).
+                    self._defer_unsettled_audio(perf_ch, perf_sd, perf_au)
                     self._drain_all_silent_perfs(perf_sd, perf_au)
 
                 for mov in mov_files:
@@ -3768,6 +3823,9 @@ class Pipeline(VideoMixin, AudioMixin, CleanupMixin,
                             perf_ch[self._perf_key(f)].append(f)
                     perf_sd = self._collect_chan_candidates(self.search_dir, exclude_split=True)
                     perf_au = self._collect_chan_candidates(self.search_dir / 'Audio')
+                    # Full-channel-set gate: don't zip a performance's audio until
+                    # its channel set has settled (guards the truncation race).
+                    self._defer_unsettled_audio(perf_ch, perf_sd, perf_au)
                     self._drain_all_silent_perfs(perf_sd, perf_au)
 
                 for mov in mov_files:

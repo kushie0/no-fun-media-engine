@@ -1,6 +1,8 @@
 """Unit tests for nofun/audio.py (AudioMixin)."""
 
+import os
 import pathlib
+import time
 import zipfile
 from unittest.mock import MagicMock, patch
 
@@ -695,3 +697,55 @@ class TestMROArchiveOrDedup:
             "CleanupMixin's real implementation via MRO. Use TYPE_CHECKING to "
             "declare it for type checkers only."
         )
+
+
+class TestChannelSetSettleGate:
+    """Full-channel-set gate: don't zip a performance's audio until its channel
+    set has stopped growing, so a partial set can't be zipped-then-deleted
+    (the truncation race that shipped 3 of 11 channels for 2026-06-06 Kitty).
+    """
+
+    def _chan(self, tmp_path, name, *, age_s):
+        f = tmp_path / name
+        f.write_bytes(_REAL_WAV)
+        t = time.time() - age_s
+        os.utime(f, (t, t))
+        return f
+
+    def test_recent_channels_not_settled(self, tmp_path):
+        fa = _FakeAudio(tmp_path)
+        files = [self._chan(tmp_path, f'26-01-01_Band_chan{n}.wav', age_s=5)
+                 for n in (1, 2, 3)]
+        assert fa._channel_set_settled(files) is False
+
+    def test_old_channels_settled(self, tmp_path):
+        fa = _FakeAudio(tmp_path)
+        files = [self._chan(tmp_path, f'26-01-01_Band_chan{n}.wav',
+                            age_s=fa._CHAN_SET_SETTLE_SECS + 30)
+                 for n in (1, 2, 3)]
+        assert fa._channel_set_settled(files) is True
+
+    def test_one_recent_channel_holds_the_whole_set(self, tmp_path):
+        """A single just-written channel keeps the set unsettled — this is the
+        exact case the gate must catch (late channel still arriving)."""
+        fa = _FakeAudio(tmp_path)
+        files = [self._chan(tmp_path, '26-01-01_Band_chan1.wav', age_s=9000),
+                 self._chan(tmp_path, '26-01-01_Band_chan2.wav', age_s=9000),
+                 self._chan(tmp_path, '26-01-01_Band_chan3.wav', age_s=2)]
+        assert fa._channel_set_settled(files) is False
+
+    def test_empty_never_settled(self, tmp_path):
+        fa = _FakeAudio(tmp_path)
+        assert fa._channel_set_settled([]) is False
+
+    def test_defer_drops_unsettled_keeps_settled(self, tmp_path):
+        fa = _FakeAudio(tmp_path)
+        settled = self._chan(tmp_path, '26-01-01_Ready_chan1.wav',
+                             age_s=fa._CHAN_SET_SETTLE_SECS + 30)
+        unsettled = self._chan(tmp_path, '26-01-02_Wait_chan1.wav', age_s=5)
+        perf_ch = {'26-01-01_Ready': [settled], '26-01-02_Wait': [unsettled]}
+        perf_sd: dict = {}
+        perf_au: dict = {}
+        fa._defer_unsettled_audio(perf_ch, perf_sd, perf_au)
+        assert '26-01-01_Ready' in perf_ch      # settled → kept
+        assert '26-01-02_Wait' not in perf_ch    # still settling → deferred

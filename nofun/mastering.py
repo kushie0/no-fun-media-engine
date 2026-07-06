@@ -97,6 +97,11 @@ OTT_MASTER_GAIN_L_DB:   float = 0.0  # low-band output level  (-inf–+6 dB)
 OTT_MASTER_GAIN_M_DB:   float = 0.0  # mid-band output level  (-inf–+6 dB)
 OTT_MASTER_GAIN_H_DB:   float = -1.0  # high-band output level (-inf–+6 dB)
 
+# Final loudness target (set-and-forget). loudnorm on the encoded master brings the whole
+# mix up to a consistent integrated LUFS so uploads (and the reel that muxes this master)
+# aren't quiet vs. platform norm — without slamming OTT, which lifted the noise floor.
+MASTER_LUFS: float = -12.0
+
 # Room channels (29=L, 30=R) — spatial glue + crowd energy, NOT vocal carrier.
 # EQ neutral (the HPF + parallel crush + M/S pocket below do the shaping); upward
 # compression kept high to lift low-level crowd/cheers above the dry board feed.
@@ -261,7 +266,8 @@ def _write_stereo_mp3(
             from nofun.script_runner import ScriptJob
             job = ScriptJob(
                 script='transcode_mp3',
-                args={'source': str(tmp), 'dest': str(path)},
+                args={'source': str(tmp), 'dest': str(path),
+                      'lufs': str(MASTER_LUFS)},
                 label=f'MP3  {path.name}',
             )
             result = script_runner.run(job)
@@ -273,6 +279,7 @@ def _write_stereo_mp3(
             subprocess.run(
                 ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                  '-i', str(tmp),
+                 '-af', f'loudnorm=I={MASTER_LUFS}:TP=-1.5:LRA=11',
                  '-c:a', 'libmp3lame', '-q:a', '2',
                  str(path)],
                 check=True,
