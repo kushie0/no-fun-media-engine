@@ -2,7 +2,7 @@
 # Lets TouchDesigner compare known-good (VLC) against the new path side-by-side.
 
 param(
-    [string]$ClipRoot = "D:\clips"
+    [string]$ClipRoot = "C:\clips"
 )
 
 $ErrorActionPreference = 'Stop'

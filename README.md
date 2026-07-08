@@ -1,12 +1,19 @@
 # no-fun-media-engine
 
-Watchdog pipeline that processes concert recordings into archived assets: 4-quadrant MP4s, 320×180 proxy clips, and per-performance audio ZIP archives.
+Unattended pipeline that turns each night's live-venue recordings into finished, shareable assets. A Textual TUI engine watches the record folder and, per performance, produces:
+
+- **4-quadrant camera MP4s** (GPU-encoded) plus 320×180 proxy clips for the venue's video walls
+- **Multitrack audio archives** — ~32 channels as 24-bit FLAC inside one `_MULTITRACK.zip`
+- **Mastered stereo mix** (`_AUDIO.mp3`, loudness-normalised to −12 LUFS) and a 9:16 **Instagram reel** (`_INSTAGRAM.mp4`)
+- **Cloud delivery** — completed performances sync to OneDrive/SharePoint on a 28-day lease
 
 <p align="center">
   <img src="docs/screenshots/quadrant-output-1.jpg" width="80%" alt="4-quadrant output frame" />
 </p>
 
-Audio input is ~32 pre-separated single-channel WAVs per performance in a `VenueLighting/Audio/` subfolder.
+Everything runs from a scheduled job queue with GPU and CPU lanes, storage tiers (NAS primary with local fallback and backup mirrors), automatic raw/cloud expiry, and a self-auditing cleanup pass. Companion scripts stream the clip library to the venue's TVs (`start-streams.ps1`, `scripts/streams/`).
+
+Audio input is ~32 pre-separated single-channel WAVs per performance in a `VenueLighting/Audio/` subfolder; video input is the multi-camera `.mov` from the recorder.
 
 ## Requirements
 
@@ -40,7 +47,7 @@ none of them — set only what differs on another machine.
 | `SEARCH_DIR` | `C:\Users\<username>\VenueLighting` | Source directory to watch |
 | `MOUNT_D` | `D:/` | Output drive root |
 | `MOUNT_C` | `C:/` | Companion override (rarely needed) |
-| `CLIPS_ROOT` | `<MOUNT_D>/clips` | Clip output directory (C: SSD; never follows the NAS) |
+| `CLIPS_ROOT` | `C:\clips` | Clip output directory (C: SSD streaming primary; never follows the NAS). `D:\clips` is deprecated — see `docs/guides/clip-storage.md` |
 | `NAS_ROOT` | _(unset)_ | NAS media root; falls back to `MOUNT_D` when unreachable |
 | `SHAREPOINT_DEST` | `…\<user>\OneDrive - No Fun Troy LLC\Multitracks` | OneDrive sync folder (cloud disabled if absent) |
 | `VIDEOS_SUBDIR` | `videos` | Media subdir name under the media root |
@@ -54,10 +61,10 @@ All output lands on `MOUNT_D`. Directories are created on first run.
 
 | Path | Contents |
 |------|----------|
-| `D:\videos\` | Quadrant MP4s |
-| `D:\clips\` | Proxy clip segments |
-| `D:\audio\` | Per-performance audio ZIP archives |
-| `D:\video_archive\` | Source MOVs archived after encoding (auto-deleted after 10 days) |
+| `D:\videos\` | Quadrant MP4s and `_INSTAGRAM.mp4` reels |
+| `C:\clips\` | Proxy clip segments (SSD streaming primary; `D:\clips` deprecated) |
+| `D:\audio\` | `_MULTITRACK.zip` (per-channel 24-bit FLAC) and mastered `_AUDIO.mp3` per performance |
+| `D:\video_archive\` | Source MOVs archived after encoding (auto-deleted after 30 days) |
 | `D:\audio_archive\` | Source WAVs archived after splitting (same expiry) |
 | `D:\logs\` | Rotating log files |
 
@@ -83,6 +90,7 @@ uv run pytest
 
 - `docs/guides/architecture.md` — mixin diagram, threading model, PAUSE state machine
 - `docs/guides/filename-conventions.md` — source, quadrant, clip, audio, and ZIP naming formats
+- `docs/guides/prod-processes.md` — prod scheduled tasks, process families, and health checks
 
 ## License
 

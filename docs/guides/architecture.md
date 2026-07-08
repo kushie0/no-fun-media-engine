@@ -26,7 +26,7 @@ do not call `super().__init__`.
 VenueLighting/
   ├── YY-MM-DD_Band.N.mov  ──► _process_mov()
   │                             ├── _encode_quadrants()  → D:\videos\YY-MM-DD_Band_CAM1..CAM4.mp4
-  │                             └── _export_clips()      → D:\clips\YY-MM-DD_Band\*.mp4
+  │                             └── _export_clips()      → C:\clips\YY-MM-DD_Band\*.mp4  (SSD streaming primary)
   │
   ├── YY-MM-DD_Band_chanNN.0.wav   ──► _collect_chan_candidates(root) → _process_audio_group()   [PRIMARY]
   │     (~32 pre-separated single-channel WAVs from hardware, in the VenueLighting root)
@@ -44,6 +44,19 @@ Note the `_chanNN` per-channel inputs are **not** the `_chNN` split outputs: the
 `_ch\d+\.wav$` split regex (`nofun/audio.py`), so the primary path treats them as ordinary
 single-channel WAVs and never invokes `_split_multichannel_wavs`.
 
+## Drives at a glance (prod `DESKTOP-FVRSFIV`, mapped 2026-07-02)
+
+| Drive | Label | Size | Free | Role |
+|---|---|---|---|---|
+| **`C:`** | *(none)* | 931 GB | **~31 GB (3%) ⚠️** | **System + RECORD drive.** TD records raw `.mov` + per-channel `.wav` to `C:\Users\NOFUNadmin\VenueLighting\` (the engine's `search_dir`); also holds the engine repo (`C:\Users\NOFUNadmin\clips`), OneDrive Multitracks cache, `tools\`, `wer_touchplayer\`. Raw recordings linger here until `RAW_EXPIRE_AGE` (14 d). |
+| **`D:`** | Ralph | 3.7 TB | ~594 GB (16%) | **Pipeline output / working** — all engine output (`videos/audio/clips/*_archive`), `tmp\` (dumps, stress logs), `logs\`. |
+| **`E:`** | DNNoFun5TB1 | 4.7 TB | ~980 GB (21%) | **Backup** — `2026_NoFun_AV-Backup\`. |
+
+⚠️ **`C:` is near-full (3% free).** It is *both* the OS drive and the record target, and raw
+multichannel recordings (~425 MB × ~32 ch per show) accumulate in `VenueLighting\` for up to 14 days.
+A show or two could fill it → recording failure / system instability. Never run write-fill disk
+stress on `C:`; disk-contention testing there must be **read-churn only** (no growth).
+
 ## Prod filesystem layout (`D:\`)
 
 All pipeline output lands on `D:\` (`mount_d`). Code references these paths
@@ -55,7 +68,7 @@ via named attributes set in `Pipeline.__init__` (`media_engine.py`).
 | `D:\audio\` | `audio_dest` | Audio ZIP archives — output of `_export_audio_zips()` |
 | `D:\audio_archive\` | `audio_archive` | All ~32 per-channel input WAVs after processing — both silent and zipped-active channels (primary path). For legacy multichannel recordings, the split outputs + original land here too. Cleaned up (deleted) once the corresponding ZIP exists in `D:\audio\` and age > `RAW_EXPIRE_AGE`. |
 | `D:\video_archive\` | `video_archive` | Source `.mov` files archived here after encoding. Cleaned up once ≥4 quad files exist and age > `RAW_EXPIRE_AGE`. |
-| `D:\clips\` | (via `paths.py`) | Short clip thumbnails — output of `_export_clips()`. |
+| `C:\clips\` | `clips_dest` (via `paths.py`) | Short clip thumbnails — output of `_export_clips()`. **Lives on C:, not D:** — SSD primary read by every stream feed (gtv + venue VLC), mirrored to NAS hourly by `ClipsNasMirror`. `D:\clips\` is deprecated/stale. See [`clip-storage.md`](clip-storage.md). |
 | `D:\logs\` | — | Rolling log files (`RemoteRotatingHandler`, 800 KB rotation per file). |
 | `D:\hard_paused\` | — | Partial encode outputs saved after a hard-stop PAUSE event. |
 

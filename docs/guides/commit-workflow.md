@@ -143,3 +143,22 @@ Also bad (the mega-commit pattern):
 
 The goal is commits that a future developer (or future you, debugging a regression)
 can bisect, read, and revert independently.
+
+---
+
+## Two remotes: private granular, public curated
+
+Since 2026-07-08 this repo has two remotes:
+
+| Remote | Repo | Holds |
+|---|---|---|
+| `private` | `kushie0/no-fun-media-engine-private` | **All** branches — granular `dev` history, in-flight feature branches. Prod deploys from here (`git pull origin dev` on prod; prod's `origin` points at the private repo over SSH). |
+| `origin` | `kushie0/no-fun-media-engine` (public) | `main` only — curated release history. |
+
+Daily work: commit granular to `dev`, push to `private` (that's `dev`'s upstream, so a
+plain `git push` goes there). **Never push `dev` or feature branches to `origin`.**
+
+Public releases are **feature-milestone commits**, not a curated dev log — the full
+procedure (boundary snapshots, gates, push rules) lives in
+[`release-workflow.md`](release-workflow.md). Everything above this section is about
+`dev`'s granular history, which only ever reaches the private repo.

@@ -109,7 +109,7 @@ def _section_paths(lines: list[str], mount_c: pathlib.Path,
                                       / 'OneDrive - No Fun Troy LLC' / 'Multitracks'),
         ("D:\\videos",                mount_d / 'videos'),
         ("D:\\audio",                 mount_d / 'audio'),
-        ("D:\\clips",                 mount_d / 'clips'),
+        ("C:\\clips",                 mount_c / 'clips'),
         # Legacy paths that should now be empty or gone:
         ("D:\\video_archive",          mount_d / 'video_archive'),
         ("D:\\audio_archive",          mount_d / 'audio_archive'),

@@ -17,10 +17,10 @@ param(
   [int]$FeedCount = 4,
   [string]$Subnet = '192.168.0',          # /24 to scan for sticks
   [int]$AdbPort = 5555,
-  [int]$HealSeconds = 15,                  # how often to check reception
+  [int]$HealSeconds = 10,                  # how often to check reception
   [int]$DiscoverEverySeconds = 60,         # how often to rescan the subnet for new sticks
-  [int]$RestartCooldown = 45,              # min seconds between clean-restarts of the same stick
-  [int]$ResetMinutes = 30,                 # periodic force-restart even while 'receiving' — clears a FROZEN VLC
+  [int]$RestartCooldown = 30,              # min seconds between clean-restarts of the same stick
+  [int]$ResetMinutes = 60,                 # periodic force-restart even while 'receiving' — clears a FROZEN VLC
   [int]$AdbTimeout = 8,                    # per-adb-call timeout (seconds)
   [int]$TelemetrySeconds = 300,            # how often to log per-stick wifi telemetry (RSSI/link speed)
   # Optional stable per-TV assignment, e.g. '192.168.0.242=gtv1,192.168.0.174=gtv2'.
@@ -30,6 +30,11 @@ param(
   [string]$Root = 'C:\Users\NOFUNadmin\clips\scratch\ndi',
   # adb lives one level up (shared platform-tools) — keep its own absolute default; do NOT move it.
   [string]$Adb = 'C:\Users\NOFUNadmin\clips\scratch\platform-tools\adb.exe',
+  # Local fallback screen packaged in the tv-boot APK. This is intentionally on-stick, not streamed.
+  [string]$LogoPackage = 'com.nofun.tvboot',
+  [string]$LogoActivity = 'com.nofun.tvboot/.LogoActivity',
+  [int]$PostRestartWaitSeconds = 30,
+  [int]$PostRestartRetrySeconds = 5,
   [string]$Log = (Join-Path $Root 'gtv_heal.log')
 )
 
@@ -109,14 +114,45 @@ function Stick-Receiving([string]$stickIp) {
   return [bool]$r
 }
 
+function Get-FocusedApp([string]$dev) {
+  $w = AdbCall @('-s', $dev, 'shell', 'dumpsys', 'window') 5
+  if (-not $w) { return '' }
+  foreach ($line in ($w -split "`r?`n")) {
+    if ($line -match 'mCurrentFocus=.*') { return $line.Trim() }
+  }
+  return ''
+}
+
+function Show-LocalLogo([string]$dev) {
+  # Do not force-stop this package: force-stop marks it "stopped" and blocks future boot broadcasts
+  # until an activity is manually launched. Starting LogoActivity is enough to foreground the local,
+  # no-network fallback and also un-stops the package after install.
+  AdbCall @('-s', $dev, 'shell', 'am', 'start', '-n', $LogoActivity) 5 | Out-Null
+}
+
+function Hide-LocalLogo([string]$dev) {
+  # If the logo is foreground, BACK finishes LogoActivity without marking the package stopped.
+  # Avoid sending BACK blindly while VLC is foreground; that can exit playback.
+  $focus = Get-FocusedApp $dev
+  if ($focus -like "*$LogoPackage*") {
+    AdbCall @('-s', $dev, 'shell', 'input', 'keyevent', 'BACK') 3 | Out-Null
+    Start-Sleep -Seconds 1
+  }
+}
+
+function Start-Vlc([string]$dev, [string]$url) {
+  AdbCall @('-s', $dev, 'shell', 'am', 'start', '-n',
+    'org.videolan.vlc/.gui.video.VideoPlayerActivity', '-a', 'android.intent.action.VIEW',
+    '-d', $url) | Out-Null
+}
+
 # Clean VLC restart: force-stop then relaunch on the feed. Used both to recover a not-receiving stick
 # and as the periodic known-good reset that clears a frozen-but-connected VLC.
 function Invoke-VlcRestart([string]$dev, [string]$url) {
   AdbCall @('connect', $dev) 5 | Out-Null
+  Hide-LocalLogo $dev
   AdbCall @('-s', $dev, 'shell', 'am', 'force-stop', 'org.videolan.vlc') | Out-Null
-  AdbCall @('-s', $dev, 'shell', 'am', 'start', '-n',
-    'org.videolan.vlc/.gui.video.VideoPlayerActivity', '-a', 'android.intent.action.VIEW',
-    '-d', $url) | Out-Null
+  Start-Vlc $dev $url
 }
 
 # One bounded adb call for the stick's wifi link state. Returns 'rssi=-49 tx=175Mbps rx=87Mbps'
@@ -195,12 +231,24 @@ while ($true) {
     $receiving[$dev] = $false
     $now = Get-Date
     if ($lastRestart.ContainsKey($dev) -and ($now - $lastRestart[$dev]).TotalSeconds -lt $RestartCooldown) {
+      Show-LocalLogo $dev
       continue   # gave it a restart recently; let VLC finish booting + connecting
     }
     $tel = Get-WifiTel $dev
     Invoke-VlcRestart $dev $url
     $lastRestart[$dev] = $now; $lastReset[$dev] = $now; $lastTel[$dev] = $now
-    L ("restarted (not receiving) $dev -> $url" + $(if ($tel) { "  [$tel]" } else { '' }))
+    $deadline = (Get-Date).AddSeconds($PostRestartWaitSeconds)
+    while ((Get-Date) -lt $deadline -and -not (Stick-Receiving $stickIp)) {
+      Start-Sleep -Seconds $PostRestartRetrySeconds
+      if (-not (Stick-Receiving $stickIp)) { Start-Vlc $dev $url }
+    }
+    if (Stick-Receiving $stickIp) {
+      L ("restarted + receiving $dev -> $url" + $(if ($tel) { "  [$tel]" } else { '' }))
+      $receiving[$dev] = $true
+    } else {
+      Show-LocalLogo $dev
+      L ("restarted but still not receiving; showing local logo $dev -> $url" + $(if ($tel) { "  [$tel]" } else { '' }))
+    }
   }
 
   Start-Sleep -Seconds $HealSeconds

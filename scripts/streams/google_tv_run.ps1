@@ -1,5 +1,5 @@
 param(
-  [string]$ClipRoot = 'D:\clips',
+  [string]$ClipRoot = 'C:\clips',
   # Runtime dir: where mediamtx.exe lives and where logs / mtx-*.yml / *.ffconcat / cmd files are written.
   # Defaults to the current prod location so behavior is unchanged now that the SCRIPT lives in git.
   [string]$Root = 'C:\Users\NOFUNadmin\clips\scratch\ndi',
@@ -12,7 +12,7 @@ param(
   [string]$Preset = 'veryfast',
   # Clips are H.264 320x180. A native 2x2 quad is 640x360 (each cell 320x180 — no upscaling).
   # Encoding larger just upscales the same source: more bitrate/encode load, zero added detail.
-  [string]$Bitrate = '2M',
+  [string]$Bitrate = '800k',
   [int]$SwitchMinutes = 20,
   [int]$QuadMinutes = 15,
   [int]$Width = 640,
@@ -21,13 +21,16 @@ param(
   # Clips are a fixed length (STEP_SECONDS=40). We phase-shift the 4 quad cells by fractions of this
   # so they don't all cut at the same instant. Keep in sync with the real clip length.
   [int]$ClipSeconds = 40,
-  # Clip selection mirrors start-streams.ps1 Build-Picks: bias the wall toward tonight + recent
-  # footage. tonight (filename date == today) / recent (<= RecentDays, by mtime) / library, filled
-  # ~TodayShare / RecentShare / remainder, re-sampled each cycle for variety.
-  [double]$TodayShare = 0.33,
-  [int]$RecentDays = 21,
-  [double]$RecentShare = 0.33,
-  # Re-scanning the ~87k-clip tree takes seconds; only do it this often. On a crash-relaunch we reuse
+  # Clip selection: 22% from the last 2 weeks, 33% from the last 2 months excluding those first
+  # 2 weeks, then the remainder sampled from the entire library. Re-sampled each worker launch.
+  [Alias('TodayShare')]
+  [double]$LastTwoWeeksShare = 0.22,
+  [int]$LastTwoWeeksDays = 14,
+  [Alias('RecentShare')]
+  [double]$LastTwoMonthsShare = 0.33,
+  [Alias('RecentDays')]
+  [int]$LastTwoMonthsDays = 60,
+  # Re-scanning the ~167k-clip tree takes seconds; only do it this often. On a crash-relaunch we reuse
   # the cached list so the publisher returns in ~1-2s instead of ~30s.
   [int]$RescanMinutes = 60,
   # One RTSP feed per stream stick. Set this to how many sticks you're driving.
@@ -75,6 +78,9 @@ function Ensure-MediaMtx {
   @"
 rtspAddress: :$RtspPort
 rtspTransports: [tcp]
+readTimeout: 60s
+writeTimeout: 60s
+writeQueueSize: 2048
 rtmp: no
 hls: no
 webrtc: no
@@ -126,39 +132,39 @@ function Write-Playlist($name, $clips, $firstInpoint = 0) {
   return $file
 }
 
-# Split the clip list into recency buckets (ported from start-streams.ps1). Recomputed each cycle so
-# "tonight" tracks newly-landed clips.
+# Split the clip list into recency buckets. Recomputed on worker relaunch/rescan so newly-landed clips
+# move into the weighted windows without touching running ffmpeg publishers.
 function Split-Buckets($allClips) {
-  $tonightPrefix = (Get-Date).ToString('yy-MM-dd')
-  $today = @($allClips | Where-Object { $_.Name -like "$tonightPrefix*" })
-  $recentCut = (Get-Date).AddDays(-$RecentDays)
-  $recent = @($allClips | Where-Object {
-    $_.LastWriteTime -gt $recentCut -and -not ($_.Name -like "$tonightPrefix*") })
-  return @{ today = $today; recent = $recent }
+  $twoWeekCut = (Get-Date).AddDays(-$LastTwoWeeksDays)
+  $twoMonthCut = (Get-Date).AddDays(-$LastTwoMonthsDays)
+  $twoWeeks = @($allClips | Where-Object { $_.LastWriteTime -gt $twoWeekCut })
+  $twoMonths = @($allClips | Where-Object {
+    $_.LastWriteTime -gt $twoMonthCut -and $_.LastWriteTime -le $twoWeekCut })
+  return @{ twoWeeks = $twoWeeks; twoMonths = $twoMonths }
 }
 
-# Bucketed sampling, ported from start-streams.ps1 Build-Picks: fill from tonight first, then recent,
-# then the whole library for the remainder. Re-sampled every call so the wall stays varied.
-function Build-Picks($allClips, $todayClips, $recentClips) {
+# Bucketed sampling: fill from the last 2 weeks first, then the prior 2-month window, then the whole
+# library for the remainder. Re-sampled every call so the wall stays varied.
+function Build-Picks($allClips, $twoWeekClips, $twoMonthClips) {
   $picks = @()
-  $todayTarget = [int]($PlaylistSize * $TodayShare)
-  while ($todayClips.Count -gt 0 -and $picks.Count -lt $todayTarget) {
-    $picks += $todayClips | Get-Random -Count ([Math]::Min($todayClips.Count, $todayTarget - $picks.Count))
+  $twoWeekTarget = [int]($PlaylistSize * $LastTwoWeeksShare)
+  while ($twoWeekClips.Count -gt 0 -and $picks.Count -lt $twoWeekTarget) {
+    $picks += $twoWeekClips | Get-Random -Count ([Math]::Min($twoWeekClips.Count, $twoWeekTarget - $picks.Count))
   }
-  $recentTarget = $picks.Count + [int]($PlaylistSize * $RecentShare)
-  while ($recentClips.Count -gt 0 -and $picks.Count -lt $recentTarget) {
-    $picks += $recentClips | Get-Random -Count ([Math]::Min($recentClips.Count, $recentTarget - $picks.Count))
+  $twoMonthTarget = $picks.Count + [int]($PlaylistSize * $LastTwoMonthsShare)
+  while ($twoMonthClips.Count -gt 0 -and $picks.Count -lt $twoMonthTarget) {
+    $picks += $twoMonthClips | Get-Random -Count ([Math]::Min($twoMonthClips.Count, $twoMonthTarget - $picks.Count))
   }
   $rest = [Math]::Min($allClips.Count, $PlaylistSize - $picks.Count)
   if ($rest -gt 0) { $picks += $allClips | Get-Random -Count $rest }
   ,$picks
 }
 
-function New-BucketedPlaylist($name, $allClips, $todayClips, $recentClips, $firstInpoint = 0) {
-  Write-Playlist $name (Build-Picks $allClips $todayClips $recentClips) $firstInpoint
+function New-BucketedPlaylist($name, $allClips, $twoWeekClips, $twoMonthClips, $firstInpoint = 0) {
+  Write-Playlist $name (Build-Picks $allClips $twoWeekClips $twoMonthClips) $firstInpoint
 }
 
-function Invoke-Phase($phase, $seconds, $allClips, $todayClips, $recentClips, $loop = $false) {
+function Invoke-Phase($phase, $seconds, $allClips, $twoWeekClips, $twoMonthClips, $loop = $false) {
   $rtspUrl = "rtsp://127.0.0.1:$RtspPort/$Path"
   $halfW = [int]($Width / 2)
   $halfH = [int]($Height / 2)
@@ -171,10 +177,10 @@ function Invoke-Phase($phase, $seconds, $allClips, $todayClips, $recentClips, $l
     # different fraction of ClipSeconds in (via ffconcat `inpoint`), phase-shifting its boundaries.
     # Result: one cell flips every ~ClipSeconds/4 s (10s) instead of all four every 40s.
     $sk = 0..3 | ForEach-Object { [int]($_ * $ClipSeconds / 4) }
-    $p1 = New-BucketedPlaylist "$Path-quad-a" $allClips $todayClips $recentClips $sk[0]
-    $p2 = New-BucketedPlaylist "$Path-quad-b" $allClips $todayClips $recentClips $sk[1]
-    $p3 = New-BucketedPlaylist "$Path-quad-c" $allClips $todayClips $recentClips $sk[2]
-    $p4 = New-BucketedPlaylist "$Path-quad-d" $allClips $todayClips $recentClips $sk[3]
+    $p1 = New-BucketedPlaylist "$Path-quad-a" $allClips $twoWeekClips $twoMonthClips $sk[0]
+    $p2 = New-BucketedPlaylist "$Path-quad-b" $allClips $twoWeekClips $twoMonthClips $sk[1]
+    $p3 = New-BucketedPlaylist "$Path-quad-c" $allClips $twoWeekClips $twoMonthClips $sk[2]
+    $p4 = New-BucketedPlaylist "$Path-quad-d" $allClips $twoWeekClips $twoMonthClips $sk[3]
     $filter = (
       "[0:v]fps=30,scale=${halfW}:${halfH},setpts=PTS-STARTPTS[q1];" +
       "[1:v]fps=30,scale=${halfW}:${halfH},setpts=PTS-STARTPTS[q2];" +
@@ -189,17 +195,20 @@ function Invoke-Phase($phase, $seconds, $allClips, $todayClips, $recentClips, $l
       $lp + @('-re', '-f', 'concat', '-safe', '0', '-i', $p4) +
       @('-filter_complex', $filter, '-map', '[out]')
   } else {
-    $p1 = New-BucketedPlaylist "$Path-single" $allClips $todayClips $recentClips
+    $p1 = New-BucketedPlaylist "$Path-single" $allClips $twoWeekClips $twoMonthClips
     $args = @('-hide_banner', '-loglevel', 'warning') +
       $lp + @('-re', '-f', 'concat', '-safe', '0', '-i', $p1,
       '-vf', "fps=30,scale=${Width}:${Height},setpts=PTS-STARTPTS,format=yuv420p")
   }
 
   $venc = @('-c:v', $Encoder)
-  if ($Encoder -match 'x26[45]') { $venc += @('-preset', $Preset) }   # preset only applies to software x26x
+  if ($Encoder -match 'x26[45]') {
+    # Keep the stick decoder and mediamtx TCP writer out of latency/backpressure trouble.
+    $venc += @('-preset', $Preset, '-tune', 'zerolatency', '-profile:v', 'baseline', '-level', '3.1')
+  }
   $tail = @('-metadata', "comment=nofun_google_tv_$Path") + $venc + @(
-    '-b:v', $Bitrate, '-pix_fmt', 'yuv420p', '-g', '60', '-an',
-    '-f', 'rtsp', '-rtsp_transport', 'tcp', $rtspUrl
+    '-b:v', $Bitrate, '-maxrate', $Bitrate, '-bufsize', $Bitrate, '-pix_fmt', 'yuv420p', '-g', '60', '-an',
+    '-f', 'rtsp', '-rtsp_transport', 'tcp', '-pkt_size', '1200', $rtspUrl
   )
   # -t caps a phase (rotation mode); loop mode has no cap so ffmpeg runs forever.
   if (-not $loop) { $tail = @('-t', [string]$seconds) + $tail }
@@ -240,10 +249,10 @@ function Invoke-Worker {
     if ($QuadOnly) {
       # Loop mode: ffmpeg runs forever (never tears down the publisher). If it ever exits (crash), the
       # loop re-enters and relaunches; only then do we rescan/rebuild for a fresh selection.
-      Invoke-Phase 'quad' 0 $allClips $buckets.today $buckets.recent $true
+      Invoke-Phase 'quad' 0 $allClips $buckets.twoWeeks $buckets.twoMonths $true
     } else {
-      Invoke-Phase 'quad' $quadSeconds $allClips $buckets.today $buckets.recent
-      Invoke-Phase 'single' $singleSeconds $allClips $buckets.today $buckets.recent
+      Invoke-Phase 'quad' $quadSeconds $allClips $buckets.twoWeeks $buckets.twoMonths
+      Invoke-Phase 'single' $singleSeconds $allClips $buckets.twoWeeks $buckets.twoMonths
     }
     # Reuse the cached clip list across relaunches (fast recovery); only re-scan periodically.
     if (((Get-Date) - $lastScan).TotalMinutes -ge $RescanMinutes) {
@@ -291,9 +300,10 @@ function Invoke-Supervisor {
       '-Height', [string]$Height,
       '-PlaylistSize', [string]$PlaylistSize,
       '-ClipSeconds', [string]$ClipSeconds,
-      '-TodayShare', [string]$TodayShare,
-      '-RecentDays', [string]$RecentDays,
-      '-RecentShare', [string]$RecentShare,
+      '-LastTwoWeeksShare', [string]$LastTwoWeeksShare,
+      '-LastTwoWeeksDays', [string]$LastTwoWeeksDays,
+      '-LastTwoMonthsShare', [string]$LastTwoMonthsShare,
+      '-LastTwoMonthsDays', [string]$LastTwoMonthsDays,
       '-RescanMinutes', [string]$RescanMinutes
     )
     if ($QuadOnly) { $args += '-QuadOnly' }

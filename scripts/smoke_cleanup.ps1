@@ -21,7 +21,7 @@ $globs = @(
     "$nas\audio_archive\$Perf*"
     "$vl\$Perf*"
     "$vl\Audio\$Perf*"
-    "D:\clips\$Perf*"
+    "C:\clips\$Perf*"
     "$od\$Perf*"
 )
 

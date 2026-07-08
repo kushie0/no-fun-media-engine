@@ -1,5 +1,5 @@
 param(
-    [string]$ClipRoot = "D:\clips",
+    [string]$ClipRoot = "C:\clips",
     [int]$StreamCount = 5
 )
 

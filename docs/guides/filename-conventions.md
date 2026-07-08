@@ -50,10 +50,10 @@ sources from the `_CAM1.mp4` quad — old `_UL`-named quads will not be found.
 
 ## Proxy clips
 
-Clips are exported to `D:\clips\<base>\` with an index suffix:
+Clips are exported to `C:\clips\<base>\` with an index suffix:
 
 ```
-D:\clips\20260311_DaisyChain\
+C:\clips\20260311_DaisyChain\
     20260311_DaisyChain_UL_1.mp4
     20260311_DaisyChain_UL_2.mp4
     ...

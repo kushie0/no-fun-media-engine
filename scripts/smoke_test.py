@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                    help='NAS root (holds videos/, audio/, *_archive/)')
     p.add_argument('--dmirror',  default='D:/',
                    help='D: down-mirror root (holds videos/, audio/, *_archive/)')
-    p.add_argument('--clips',    default='D:/clips')
+    p.add_argument('--clips',    default='C:/clips')
     p.add_argument('--venue',    default=str(home / 'VenueLighting'))
     p.add_argument('--onedrive',
                    default=str(home / 'OneDrive - No Fun Troy LLC' / 'Multitracks'))

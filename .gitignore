@@ -11,6 +11,8 @@
 **/*.mp4
 **/*.mov
 **/*.wav
+**/*.mp3
+**/*.flac
 **/*.zip
 !test_files/26-01-01_TestBand.mov
 !test_files/26-01-01_TestBand.wav
@@ -36,3 +38,4 @@ docs/active/
 docs/guides/ssh-workflow.md
 bin/
 scratch/
+tmp/

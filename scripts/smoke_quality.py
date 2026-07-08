@@ -31,7 +31,7 @@ Examples
   # nofunadmin); on the console session they're already authed, so omit it:
   python scripts/smoke_quality.py analyze 01-01-01_SMOKETEST \\
       --videos //192.168.0.232/nofun-archive/videos \\
-      --clips  D:/clips \\
+      --clips  C:/clips \\
       --audio  //192.168.0.232/nofun-archive/audio \\
       --reference D:/smoke_build/reference \\
       --log "$LOCALAPPDATA/nofun/engine.log"
